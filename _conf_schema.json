@@ -1,0 +1,113 @@
+{
+  "database_path": {
+    "description": "SQLite 数据库文件路径",
+    "type": "string",
+    "hint": "留空则默认存放在 AstrBot 数据目录 plugin_data/astrbot_plugin_shinjuku/shinjuku.db（删除插件不丢数据）；也可以填绝对路径，插件首次启动会自动建表。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "currency": {
+    "description": "货币显示名",
+    "type": "string",
+    "default": "猫粮"
+  },
+  "admins": {
+    "description": "管理员用户 ID 列表",
+    "type": "list",
+    "hint": "填写平台用户 ID，例如 QQ 号。管理员可操作他人账户和 admin.* 指令。",
+    "default": []
+  },
+  "redeem_code_on_register": {
+    "description": "注册后自动发放的兑换码",
+    "type": "string",
+    "hint": "填已有兑换码（例如 ABC123），新用户注册时自动领取；留空则注册时不送礼。",
+    "default": ""
+  },
+  "points_per_amount": {
+    "description": "封顶金额积分折算（元/积分）",
+    "type": "int",
+    "hint": "默认 10：触发封顶时按封顶金额折算，每 10 元封顶得 1 积分（向上取整，如白天封顶 69 得 7、会员夜晚封顶 59 得 6、24h 封顶 99 得 10）；正常时段按游玩小时数 1 小时 1 积分（不足 1 小时不计）；设 0 关闭积分。",
+    "default": 10
+  },
+  "billing": {
+    "description": "计费规则与价格",
+    "type": "object",
+    "items": {
+      "day_start": {
+        "description": "白天开始时间",
+        "type": "string",
+        "default": "11:30"
+      },
+      "day_end": {
+        "description": "白天结束时间",
+        "type": "string",
+        "default": "00:00"
+      },
+      "day_price": {
+        "description": "白天每小时价格（元）",
+        "type": "int",
+        "default": 12
+      },
+      "day_price_pass": {
+        "description": "白天月卡用户每小时价格（元）",
+        "type": "int",
+        "default": 11
+      },
+      "day_cap": {
+        "description": "白天封顶价格（元）",
+        "type": "int",
+        "default": 69
+      },
+      "day_cap_pass": {
+        "description": "白天月卡用户封顶价格（元）",
+        "type": "int",
+        "default": 59
+      },
+      "night_start": {
+        "description": "夜晚开始时间",
+        "type": "string",
+        "default": "00:00"
+      },
+      "night_end": {
+        "description": "夜晚结束时间",
+        "type": "string",
+        "default": "11:30"
+      },
+      "night_price": {
+        "description": "夜晚每小时价格（元）",
+        "type": "int",
+        "default": 13
+      },
+      "night_price_pass": {
+        "description": "夜晚月卡用户每小时价格（元）",
+        "type": "int",
+        "default": 12
+      },
+      "night_cap": {
+        "description": "夜晚封顶价格（元）",
+        "type": "int",
+        "default": 69
+      },
+      "night_cap_pass": {
+        "description": "夜晚月卡用户封顶价格（元）",
+        "type": "int",
+        "default": 59
+      },
+      "cap_24h": {
+        "description": "连续 24 小时封顶价格（元）",
+        "type": "int",
+        "default": 99
+      },
+      "cap_24h_pass": {
+        "description": "连续 24 小时月卡用户封顶价格（元）",
+        "type": "int",
+        "default": 88
+      },
+      "grace_minutes": {
+        "description": "宽限分钟：不足该分钟数的零头小时不计费",
+        "type": "int",
+        "default": 15
+      }
+    }
+  }
+}
