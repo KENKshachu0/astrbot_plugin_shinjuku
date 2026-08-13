@@ -335,7 +335,7 @@ class ShinjukuPlugin(Star):
             "register", "login", "logout", "list", "wallet", "history", "ahistory",
             "billing", "items", "redeem", "add", "mj", "member", "coupon", "giftcode", "j", "入场", "上机", "出场",
             "下机", "离场", "退场", "历史记录", "账单", "b",
-            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给", "登出",
+            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给",
         }
         command = parts[0].lstrip("/")
         command = command.split("@", 1)[0]
@@ -510,16 +510,6 @@ class ShinjukuPlugin(Star):
             return f"已强制为用户 {self._at_label(event, uid)} 退场（未结算）"
 
         event.stop_event()
-        yield event.plain_result(await self._safe(run()))
-
-    @filter.regex(r"^/?登出(?:\s|@|$)")
-    async def dengchu_cmd(self, event: AstrMessageEvent):
-        """登出：自己退场；管理员可「登出 @某人」代其退场结算"""
-        async def run():
-            uid = self._target_from_optional_arg(event)
-            result = await self.service.logout(uid)
-            return _format_leave_billing(result, self.currency, self._at_label(event, uid))
-
         yield event.plain_result(await self._safe(run()))
 
     @filter.command("billing", alias={"账单", "b"})
