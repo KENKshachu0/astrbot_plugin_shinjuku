@@ -39,9 +39,41 @@ def _duration(minutes: int) -> str:
 
 
 def _format_time_range(start: datetime, end: datetime) -> str:
-    if start.date() == end.date():
-        return f"{start:%H:%M:%S} - {end:%H:%M:%S}"
     return f"{start:%m/%d %H:%M:%S} - {end:%m/%d %H:%M:%S}"
+
+
+def _format_segment_lines(segment: dict[str, Any], currency: str, indent: str = "") -> list[str]:
+    return [
+        f"{indent}- {segment['ruleName']}",
+        f"{indent}  时段: {_format_time_range(segment['startTime'], segment['endTime'])}",
+        f"{indent}  时长: {_duration(segment['durationMinutes'])}",
+        f"{indent}  费用: {_money(segment['cost'])} {currency}{' (已封顶)' if segment['isCapped'] else ''}",
+    ]
+
+
+def _format_billing_blocks(billing: dict[str, Any], currency: str) -> list[str]:
+    segments = billing.get("segments") or []
+    blocks = billing.get("blocks") or []
+    lines: list[str] = []
+    if not segments:
+        lines.append("  (无)")
+        return lines
+    if not blocks:
+        for segment in segments:
+            lines.extend(_format_segment_lines(segment, currency))
+        return lines
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for segment in segments:
+        grouped.setdefault(segment.get("blockIndex", 0), []).append(segment)
+    for index, block in enumerate(blocks, start=1):
+        lines.append(f"[24小时块 {index}/{len(blocks)}] {_format_time_range(block['startTime'], block['endTime'])}")
+        for segment in grouped.get(index - 1, []):
+            lines.extend(_format_segment_lines(segment, currency, indent="  "))
+        if block.get("isCapped"):
+            lines.append(f"  小计: {_money(block['rawCost'])} {currency} → 封顶 {_money(block['cappedCost'])} {currency}")
+        else:
+            lines.append(f"  小计: {_money(block['cappedCost'])} {currency}")
+    return lines
 
 
 def _format_wallet(wallet: dict[str, Any], currency: str) -> str:
@@ -119,15 +151,7 @@ def _format_billing(res: dict[str, Any], currency: str) -> str:
         ]
     )
     if billing["segments"]:
-        for segment in billing["segments"]:
-            lines.extend(
-                [
-                    f"- {segment['ruleName']}",
-                    f"  时段: {_format_time_range(segment['startTime'], segment['endTime'])}",
-                    f"  时长: {_duration(segment['durationMinutes'])}",
-                    f"  费用: {_money(segment['cost'])} {currency}{' (已封顶)' if segment['isCapped'] else ''}",
-                ]
-            )
+        lines.extend(_format_billing_blocks(billing, currency))
     else:
         lines.append("  (无)")
 
@@ -180,15 +204,7 @@ def _format_leave_billing(res: dict[str, Any], currency: str, user_label: str) -
         lines.append(f"🎁 本次游玩获得 {_money(points_earned)} 积分")
     lines.extend(["---", "计费区间:"])
     if billing["segments"]:
-        for segment in billing["segments"]:
-            lines.extend(
-                [
-                    f"- {segment['ruleName']}",
-                    f"时段: {_format_time_range(segment['startTime'], segment['endTime'])}",
-                    f"时长: {_duration(segment['durationMinutes'])}",
-                    f"费用: {_money(segment['cost'])} {currency}{' (已封顶)' if segment['isCapped'] else ''}",
-                ]
-            )
+        lines.extend(_format_billing_blocks(billing, currency))
     else:
         lines.append("  (无)")
     return "\n".join(lines)

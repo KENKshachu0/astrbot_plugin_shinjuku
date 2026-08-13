@@ -499,13 +499,15 @@ class ShinjukuService:
         night_cap = int(self.billing_config.get("night_cap_pass" if monthly_pass else "night_cap") or 69)
         # 按 24 小时块逐块封顶：每个从入场时刻起的 24 小时块最多收 cap24
         segments: list[dict[str, Any]] = []
+        blocks: list[dict[str, Any]] = []
         total_cost = 0
         total_points = 0
         current = session["createdAt"]
         while current < end:
             block_end = min(current + timedelta(days=1), end)
             block = self.calculate_billing(current, block_end, monthly_pass)
-            block_cost = min(block["totalCost"], cap24) if cap24 > 0 else block["totalCost"]
+            raw_block_cost = block["totalCost"]
+            block_cost = min(raw_block_cost, cap24) if cap24 > 0 else raw_block_cost
             total_cost += block_cost
             if cap24 > 0 and block["totalCost"] > cap24:
                 # 触发 24 小时封顶：该块积分按封顶金额折算
@@ -519,6 +521,18 @@ class ShinjukuService:
                     else:
                         # 正常消费：按游玩小时数，1 小时 1 积分（不足 1 小时不计）
                         total_points += seg["durationMinutes"] // 60
+            if cap24 > 0:
+                for seg in block["segments"]:
+                    seg["blockIndex"] = len(blocks)
+                blocks.append(
+                    {
+                        "startTime": current,
+                        "endTime": block_end,
+                        "rawCost": raw_block_cost,
+                        "cappedCost": block_cost,
+                        "isCapped": raw_block_cost > cap24,
+                    }
+                )
             segments.extend(block["segments"])
             current = block_end
         result = {
@@ -526,6 +540,7 @@ class ShinjukuService:
             "startTime": session["createdAt"],
             "endTime": end,
             "segments": segments,
+            "blocks": blocks,
             "points": total_points,
         }
 
