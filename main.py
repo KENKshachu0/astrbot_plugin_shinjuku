@@ -334,7 +334,7 @@ class ShinjukuPlugin(Star):
         command_names = {
             "register", "login", "logout", "list", "wallet", "history", "ahistory",
             "billing", "items", "redeem", "add", "mj", "member", "coupon", "giftcode", "j", "入场", "上机", "出场",
-            "下机", "离场", "退场", "历史记录", "账单", "b",
+            "下机", "离场", "退场", "历史记录", "账单", "b", "背包", "钱包",
             "xsj", "新宿几", "窝几", "wj", "新宿j", "死给",
         }
         command = parts[0].lstrip("/")
