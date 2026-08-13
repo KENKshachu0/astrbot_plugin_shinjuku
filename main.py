@@ -507,7 +507,7 @@ class ShinjukuPlugin(Star):
 
         async def run():
             result = await self.service.force_logout(uid)
-            return f"已强制为用户 {self._at_label(event, uid)} 退场（未结算）"
+            return f"已强制为用户 {self._at_label(event, uid)} 退场"
 
         event.stop_event()
         yield event.plain_result(await self._safe(run()))
