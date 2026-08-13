@@ -479,6 +479,21 @@ class ShinjukuService:
                 preview["walletAfter"] = await self.wallet(str(session["userId"]), True, conn)
                 return preview
 
+    async def force_logout(self, uid: str) -> dict[str, Any]:
+        """管理员强制退场：直接关闭会话，不做结算、不发积分。"""
+        async with self._acquire() as conn:
+            async with conn.transaction():
+                session = await self.active_session(uid, conn)
+                if not session:
+                    raise ShinjukuError("用户未登录。", "USER_NOT_LOGGED_IN")
+                await conn.execute(
+                    'UPDATE "Session" SET "closedAt"=?, "isActive"=NULL, "billingCost"=0, "finalCost"=0 WHERE id=?',
+                    _now(),
+                    session["id"],
+                )
+                closed = _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', session["id"]))
+                return {"session": closed}
+
     async def billing(self, uid: str, conn: DBConn | None = None) -> dict[str, Any]:
         owns_conn = conn is None
         if owns_conn:

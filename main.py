@@ -335,7 +335,7 @@ class ShinjukuPlugin(Star):
             "register", "login", "logout", "list", "wallet", "history", "ahistory",
             "billing", "items", "redeem", "add", "mj", "member", "coupon", "giftcode", "j", "入场", "上机", "出场",
             "下机", "离场", "退场", "历史记录", "账单", "b",
-            "xsj", "新宿几", "窝几", "wj",
+            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给", "登出",
         }
         command = parts[0].lstrip("/")
         command = command.split("@", 1)[0]
@@ -488,6 +488,40 @@ class ShinjukuPlugin(Star):
 
         yield event.plain_result(await self._safe(run()))
 
+    @filter.regex(r"^/?死给(?:\s|@|$)")
+    async def force_logout_cmd(self, event: AstrMessageEvent):
+        """管理员强制退场（忽略结算）：死给 @某人"""
+        if not self._is_admin(event):
+            event.stop_event()
+            return
+        args = self._args(event)
+        at_ids = self._at_ids(event)
+        if at_ids:
+            uid = f"QQ:{at_ids[0]}"
+        elif args:
+            uid = self._normalize_user(args[0], event)
+        else:
+            event.stop_event()
+            yield event.plain_result("用法：死给 @某人")
+            return
+
+        async def run():
+            result = await self.service.force_logout(uid)
+            return f"已强制为用户 {self._at_label(event, uid)} 退场（未结算）"
+
+        event.stop_event()
+        yield event.plain_result(await self._safe(run()))
+
+    @filter.regex(r"^/?登出(?:\s|@|$)")
+    async def dengchu_cmd(self, event: AstrMessageEvent):
+        """登出：自己退场；管理员可「登出 @某人」代其退场结算"""
+        async def run():
+            uid = self._target_from_optional_arg(event)
+            result = await self.service.logout(uid)
+            return _format_leave_billing(result, self.currency, self._at_label(event, uid))
+
+        yield event.plain_result(await self._safe(run()))
+
     @filter.command("billing", alias={"账单", "b"})
     async def billing_cmd(self, event: AstrMessageEvent):
         """查看当前账单"""
@@ -562,7 +596,7 @@ class ShinjukuPlugin(Star):
 
         yield event.plain_result(await self._safe(run()))
 
-    @filter.regex(r"^(?:j|xsj|新宿几|窝几|wj)$")
+    @filter.regex(r"^(?:j|xsj|新宿几|窝几|wj|新宿j)$")
     async def j_cmd(self, event: AstrMessageEvent):
         """查询当前店内人数"""
         self._remember_sender_name(event)
