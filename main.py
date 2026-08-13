@@ -335,6 +335,7 @@ class ShinjukuPlugin(Star):
             "register", "login", "logout", "list", "wallet", "history", "ahistory",
             "billing", "items", "redeem", "add", "mj", "member", "coupon", "giftcode", "j", "入场", "上机", "出场",
             "下机", "离场", "退场", "历史记录", "账单", "b",
+            "xsj", "新宿几", "窝几", "wj",
         }
         command = parts[0].lstrip("/")
         command = command.split("@", 1)[0]
@@ -561,7 +562,7 @@ class ShinjukuPlugin(Star):
 
         yield event.plain_result(await self._safe(run()))
 
-    @filter.regex(r"^j$")
+    @filter.regex(r"^(?:j|xsj|新宿几|窝几|wj)$")
     async def j_cmd(self, event: AstrMessageEvent):
         """查询当前店内人数"""
         self._remember_sender_name(event)
