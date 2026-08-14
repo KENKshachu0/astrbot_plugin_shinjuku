@@ -426,7 +426,9 @@ class ShinjukuPlugin(Star):
         if args:
             if not self._is_admin(event):
                 raise ShinjukuError("权限不足。")
-            return self._normalize_user(args[0], event)
+            uid = self._normalize_user(args[0], event)
+            self._at_label(event, uid)  # 记住被操作用户的昵称（如管理员代上机）
+            return uid
         return self._sender_uid(event)
 
     async def _safe(self, coro):
@@ -559,6 +561,7 @@ class ShinjukuPlugin(Star):
             if not args:
                 raise ShinjukuError("用法：/ahistory <用户> [数量]")
             uid = self._normalize_user(args[0], event, allow_self=False)
+            self._at_label(event, uid)
             limit = int(args[1]) if len(args) > 1 and args[1].isdigit() else 5
             sessions = await self.service.history(uid, limit)
             return _format_history(sessions, self.currency)
