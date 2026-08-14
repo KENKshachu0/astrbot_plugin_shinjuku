@@ -280,8 +280,11 @@ class ShinjukuPlugin(Star):
         db_path = str(config.get("database_path", "") or "") or default_db
         points_per_amount = int(config.get("points_per_amount") or 10)
         max_active_checkcodes = int(config.get("max_active_checkcodes") or 20)
+        self_open_door_enabled = bool(config.get("self_open_door_enabled") is not False)
+        self.self_open_door_enabled = self_open_door_enabled
         self.service = ShinjukuService(
-            db_path, self.currency, config.get("billing", {}) or {}, points_per_amount, max_active_checkcodes
+            db_path, self.currency, config.get("billing", {}) or {}, points_per_amount, max_active_checkcodes,
+            self_open_door_enabled,
         )
         self.nicknames: dict[str, str] = {}
 
@@ -376,7 +379,7 @@ class ShinjukuPlugin(Star):
             "register", "login", "logout", "list", "wallet", "history", "ahistory",
             "billing", "items", "redeem", "add", "mj", "member", "coupon", "giftcode", "j", "入场", "上机", "出场",
             "下机", "离场", "退场", "历史记录", "账单", "b", "背包", "钱包",
-            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给",
+            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给", "开门",
         }
         command = parts[0].lstrip("/")
         command = command.split("@", 1)[0]
@@ -520,11 +523,14 @@ class ShinjukuPlugin(Star):
             login_result = await self.service.login(uid)
             session = login_result["session"]
             over_capacity = bool(login_result.get("overCapacity"))
-            if uid == sender_uid:
-                checkcode = session.get("CHECKCODE") or ""
-                msg = prefix + f"[CQ:at,qq={sender_real_qq}] ✅ 入场成功，验证码：'{checkcode}'"
+            if self.self_open_door_enabled:
+                if uid == sender_uid:
+                    checkcode = session.get("CHECKCODE") or ""
+                    msg = prefix + f"[CQ:at,qq={sender_real_qq}] ✅ 入场成功，验证码：'{checkcode}'"
+                else:
+                    msg = prefix + "✅ 入场成功"
             else:
-                msg = prefix + "✅ 入场成功"
+                msg = prefix + "✅ 入场成功，请联系管理员开门"
             if over_capacity:
                 msg += "\nwoc，音趴！"
             return msg
@@ -804,5 +810,39 @@ class ShinjukuPlugin(Star):
                 f"MJ 扣费成功：-{_money(amount)} {self.currency}\n"
                 f"余额：{_money(result['originalBalance'])} -> {_money(result['finalBalance'])} {self.currency}"
             )
+
+        yield event.plain_result(await self._safe(run()))
+
+    @filter.command("开门")
+    async def door_cmd(self, event: AstrMessageEvent):
+        """自助开门：/开门 [7位验证码]（或『开门+验证码』粘连，或『开门』单独发送）"""
+        self._remember_sender_name(event)
+        async def run():
+            if not self.self_open_door_enabled:
+                return "请联系管理员开门！"
+            raw = (event.message_str or "").strip()
+            text = raw.lstrip("/")
+            m = re.match(r"^开门\s*(\d{7})\s*$", text)
+            code = m.group(1) if m else None
+            if code is None:
+                args = self._args(event)
+                for arg in args:
+                    if re.fullmatch(r"\d{7}", arg):
+                        code = arg
+                        break
+            status = await self.service.door_verify(self._sender_uid(event), code)
+            if status == "SUCCESS":
+                return "门已开，祝您游玩愉快！"
+            if status == "NOT_PRESENT":
+                return "人在哪呢，怎么就要我给开门？"
+            if status == "WRONG_CODE":
+                return "验证码不对啦，不能给你开门哦！请检查入场时发送的验证码！"
+            if status == "STOLEN_CODE":
+                return "验证码是你的吗就乱用，明明都不在门口还想乱用别人验证码，叉出去！"
+            if status == "NO_CODE_PRESENT":
+                return "笨蛋，开门要这样用：/开门 [7位数验证码]"
+            if status == "NO_CODE_OFFLINE":
+                return "要先进场才会有验证码啦！"
+            return "开门失败：未知错误。"
 
         yield event.plain_result(await self._safe(run()))

@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import asynccontextmanager
@@ -256,12 +257,14 @@ class ShinjukuService:
         billing_config: dict[str, Any] | None = None,
         points_per_amount: int = 10,
         max_active_checkcodes: int = 20,
+        self_open_door_enabled: bool = True,
     ):
         self.db_path = db_path
         self.currency = currency
         self.billing_config = billing_config or {}
         self.points_per_amount = max(0, int(points_per_amount or 0))
         self.max_active_checkcodes = max(1, int(max_active_checkcodes or 20))
+        self.self_open_door_enabled = bool(self_open_door_enabled)
         self._queue: asyncio.Queue[DBConn] | None = None
         self._init_lock = asyncio.Lock()
 
@@ -460,7 +463,10 @@ class ShinjukuService:
                         f"当前欠费 {_money_text(debt)} {self.currency}，请先充值后再入场。",
                         "INSUFFICIENT_BALANCE_FOR_LOGIN",
                     )
-                checkcode = await self._generate_checkcode(conn)
+                if self.self_open_door_enabled:
+                    checkcode = await self._generate_checkcode(conn)
+                else:
+                    checkcode = None
                 created = await conn.execute(
                     'INSERT INTO "Session" ("userId", "createdAt", "isActive", "CHECKCODE") VALUES (?, ?, 1, ?)',
                     user["id"],
@@ -471,6 +477,40 @@ class ShinjukuService:
                 active_count = await self._active_session_count(conn)
                 over_capacity = active_count > self.max_active_checkcodes
                 return {"session": session, "overCapacity": over_capacity, "activeCount": active_count}
+
+    async def door_verify(self, sender_uid: str, code_str: str | None) -> str:
+        """自助开门校验。返回状态：
+        SUCCESS          在场+自己验证码正确
+        WRONG_CODE       在场但验证码不对或不是自己的
+        STOLEN_CODE      不在场但验证码是场内某人的（冒用他人验证码）
+        NOT_PRESENT      不在场+验证码也不是场内任何人的
+        """
+        async with self._acquire() as conn:
+            async with conn.transaction():
+                sender_user = await self.find_user(sender_uid, conn)
+                sender_active_session = None
+                if sender_user:
+                    sender_active_session = await self.active_session(sender_uid, conn)
+                if code_str is None:
+                    if sender_active_session:
+                        return "NO_CODE_PRESENT"
+                    return "NO_CODE_OFFLINE"
+                code_norm = str(code_str).strip()
+                code_owner_session = None
+                if code_norm and re.fullmatch(r"\d{7}", code_norm):
+                    code_owner_row = await conn.fetchrow(
+                        'SELECT * FROM "Session" WHERE "CHECKCODE"=? AND "isActive"=1 LIMIT 1',
+                        code_norm,
+                    )
+                    code_owner_session = _row(code_owner_row) if code_owner_row else None
+                if sender_active_session:
+                    my_code = sender_active_session.get("CHECKCODE") or ""
+                    if my_code and code_norm and code_norm == my_code:
+                        return "SUCCESS"
+                    return "WRONG_CODE"
+                if code_owner_session:
+                    return "STOLEN_CODE"
+                return "NOT_PRESENT"
 
     async def logout(self, uid: str) -> dict[str, Any]:
         async with self._acquire() as conn:
