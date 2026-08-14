@@ -530,7 +530,10 @@ class ShinjukuPlugin(Star):
                 else:
                     msg = prefix + "✅ 入场成功"
             else:
-                msg = prefix + "✅ 入场成功，请联系管理员开门"
+                if self._is_admin(event):
+                    msg = prefix + "✅ 入场成功"
+                else:
+                    msg = prefix + "✅ 入场成功，请联系管理员开门"
             if over_capacity:
                 msg += "\nwoc，音趴！"
             return msg
@@ -831,8 +834,10 @@ class ShinjukuPlugin(Star):
                         code = arg
                         break
             status = await self.service.door_verify(self._sender_uid(event), code)
-            if status == "SUCCESS":
+            if status == "SUCCESS_FIRST":
                 return "门已开，祝您游玩愉快！"
+            if status == "SUCCESS_AGAIN":
+                return "门已开！"
             if status == "NOT_PRESENT":
                 return "人在哪呢，怎么就要我给开门？"
             if status == "WRONG_CODE":

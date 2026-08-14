@@ -180,7 +180,8 @@ CREATE TABLE IF NOT EXISTS "Session" (
     "isActive" INTEGER,
     "billingCost" INTEGER,
     "finalCost" INTEGER,
-    "CHECKCODE" TEXT
+    "CHECKCODE" TEXT,
+    "doorOpened" INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_session_user_active ON "Session"("userId", "isActive");
 CREATE INDEX IF NOT EXISTS idx_session_checkcode ON "Session"("CHECKCODE");
@@ -314,6 +315,10 @@ class ShinjukuService:
         await conn._conn.executescript(SCHEMA_SQL)
         try:
             await conn._conn.execute('ALTER TABLE "Session" ADD COLUMN "CHECKCODE" TEXT')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await conn._conn.execute('ALTER TABLE "Session" ADD COLUMN "doorOpened" INTEGER NOT NULL DEFAULT 0')
         except sqlite3.OperationalError:
             pass
         try:
@@ -480,10 +485,13 @@ class ShinjukuService:
 
     async def door_verify(self, sender_uid: str, code_str: str | None) -> str:
         """自助开门校验。返回状态：
-        SUCCESS          在场+自己验证码正确
+        SUCCESS_FIRST    在场+自己验证码正确+本次入场第一次成功开门
+        SUCCESS_AGAIN    在场+自己验证码正确+非第一次
         WRONG_CODE       在场但验证码不对或不是自己的
         STOLEN_CODE      不在场但验证码是场内某人的（冒用他人验证码）
         NOT_PRESENT      不在场+验证码也不是场内任何人的
+        NO_CODE_PRESENT  在场没带验证码
+        NO_CODE_OFFLINE  不在场没带验证码
         """
         async with self._acquire() as conn:
             async with conn.transaction():
@@ -506,7 +514,14 @@ class ShinjukuService:
                 if sender_active_session:
                     my_code = sender_active_session.get("CHECKCODE") or ""
                     if my_code and code_norm and code_norm == my_code:
-                        return "SUCCESS"
+                        opened = int(sender_active_session.get("doorOpened") or 0)
+                        if not opened:
+                            await conn.execute(
+                                'UPDATE "Session" SET "doorOpened"=1 WHERE id=?',
+                                sender_active_session["id"],
+                            )
+                            return "SUCCESS_FIRST"
+                        return "SUCCESS_AGAIN"
                     return "WRONG_CODE"
                 if code_owner_session:
                     return "STOLEN_CODE"
