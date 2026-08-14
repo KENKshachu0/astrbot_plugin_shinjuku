@@ -178,9 +178,11 @@ CREATE TABLE IF NOT EXISTS "Session" (
     "closedAt" TEXT,
     "isActive" INTEGER,
     "billingCost" INTEGER,
-    "finalCost" INTEGER
+    "finalCost" INTEGER,
+    "CHECKCODE" TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_session_user_active ON "Session"("userId", "isActive");
+CREATE INDEX IF NOT EXISTS idx_session_checkcode ON "Session"("CHECKCODE");
 
 CREATE TABLE IF NOT EXISTS "Asset" (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,11 +255,13 @@ class ShinjukuService:
         currency: str = "猫粮",
         billing_config: dict[str, Any] | None = None,
         points_per_amount: int = 10,
+        max_active_checkcodes: int = 20,
     ):
         self.db_path = db_path
         self.currency = currency
         self.billing_config = billing_config or {}
         self.points_per_amount = max(0, int(points_per_amount or 0))
+        self.max_active_checkcodes = max(1, int(max_active_checkcodes or 20))
         self._queue: asyncio.Queue[DBConn] | None = None
         self._init_lock = asyncio.Lock()
 
@@ -305,6 +309,28 @@ class ShinjukuService:
 
     async def _init_schema(self, conn: DBConn) -> None:
         await conn._conn.executescript(SCHEMA_SQL)
+        try:
+            await conn._conn.execute('ALTER TABLE "Session" ADD COLUMN "CHECKCODE" TEXT')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_session_checkcode ON "Session"("CHECKCODE")')
+        except sqlite3.OperationalError:
+            pass
+
+    async def _generate_checkcode(self, conn: DBConn) -> str:
+        """生成不重复的7位数字验证码（CHECKCODE），仅在活跃会话范围内查重（离场后自动作废释放）。"""
+        while True:
+            code = f"{secrets.randbelow(9000000) + 1000000:07d}"
+            exists = await conn.fetchval(
+                'SELECT 1 FROM "Session" WHERE "CHECKCODE"=? AND "isActive"=1 LIMIT 1',
+                code,
+            )
+            if not exists:
+                return code
+
+    async def _active_session_count(self, conn: DBConn) -> int:
+        return int(await conn.fetchval('SELECT count(*) FROM "Session" WHERE "isActive"=1') or 0)
 
     @staticmethod
     def _clock_minutes(text: str) -> int:
@@ -434,12 +460,17 @@ class ShinjukuService:
                         f"当前欠费 {_money_text(debt)} {self.currency}，请先充值后再入场。",
                         "INSUFFICIENT_BALANCE_FOR_LOGIN",
                     )
+                checkcode = await self._generate_checkcode(conn)
                 created = await conn.execute(
-                    'INSERT INTO "Session" ("userId", "createdAt", "isActive") VALUES (?, ?, 1)',
+                    'INSERT INTO "Session" ("userId", "createdAt", "isActive", "CHECKCODE") VALUES (?, ?, 1, ?)',
                     user["id"],
                     _now(),
+                    checkcode,
                 )
-                return _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', created.lastrowid))
+                session = _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', created.lastrowid))
+                active_count = await self._active_session_count(conn)
+                over_capacity = active_count > self.max_active_checkcodes
+                return {"session": session, "overCapacity": over_capacity, "activeCount": active_count}
 
     async def logout(self, uid: str) -> dict[str, Any]:
         async with self._acquire() as conn:
