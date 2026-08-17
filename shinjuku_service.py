@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import asynccontextmanager
@@ -178,9 +179,12 @@ CREATE TABLE IF NOT EXISTS "Session" (
     "closedAt" TEXT,
     "isActive" INTEGER,
     "billingCost" INTEGER,
-    "finalCost" INTEGER
+    "finalCost" INTEGER,
+    "CHECKCODE" TEXT,
+    "doorOpened" INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_session_user_active ON "Session"("userId", "isActive");
+CREATE INDEX IF NOT EXISTS idx_session_checkcode ON "Session"("CHECKCODE");
 
 CREATE TABLE IF NOT EXISTS "Asset" (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -250,14 +254,20 @@ class ShinjukuService:
     def __init__(
         self,
         db_path: str,
-        currency: str = "猫粮",
+        currency: str = "馕",
         billing_config: dict[str, Any] | None = None,
         points_per_amount: int = 10,
+        max_active_checkcodes: int = 20,
+        self_open_door_enabled: bool = True,
+        login_grace_minutes: int = 3,
     ):
         self.db_path = db_path
         self.currency = currency
         self.billing_config = billing_config or {}
         self.points_per_amount = max(0, int(points_per_amount or 0))
+        self.max_active_checkcodes = max(1, int(max_active_checkcodes or 20))
+        self.self_open_door_enabled = bool(self_open_door_enabled)
+        self.login_grace_minutes = max(0, int(login_grace_minutes or 0))
         self._queue: asyncio.Queue[DBConn] | None = None
         self._init_lock = asyncio.Lock()
 
@@ -305,6 +315,32 @@ class ShinjukuService:
 
     async def _init_schema(self, conn: DBConn) -> None:
         await conn._conn.executescript(SCHEMA_SQL)
+        try:
+            await conn._conn.execute('ALTER TABLE "Session" ADD COLUMN "CHECKCODE" TEXT')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await conn._conn.execute('ALTER TABLE "Session" ADD COLUMN "doorOpened" INTEGER NOT NULL DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_session_checkcode ON "Session"("CHECKCODE")')
+        except sqlite3.OperationalError:
+            pass
+
+    async def _generate_checkcode(self, conn: DBConn) -> str:
+        """生成不重复的7位数字验证码（CHECKCODE），仅在活跃会话范围内查重（离场后自动作废释放）。"""
+        while True:
+            code = f"{secrets.randbelow(9000000) + 1000000:07d}"
+            exists = await conn.fetchval(
+                'SELECT 1 FROM "Session" WHERE "CHECKCODE"=? AND "isActive"=1 LIMIT 1',
+                code,
+            )
+            if not exists:
+                return code
+
+    async def _active_session_count(self, conn: DBConn) -> int:
+        return int(await conn.fetchval('SELECT count(*) FROM "Session" WHERE "isActive"=1') or 0)
 
     @staticmethod
     def _clock_minutes(text: str) -> int:
@@ -434,20 +470,144 @@ class ShinjukuService:
                         f"当前欠费 {_money_text(debt)} {self.currency}，请先充值后再入场。",
                         "INSUFFICIENT_BALANCE_FOR_LOGIN",
                     )
+                if self.self_open_door_enabled:
+                    checkcode = await self._generate_checkcode(conn)
+                else:
+                    checkcode = None
                 created = await conn.execute(
-                    'INSERT INTO "Session" ("userId", "createdAt", "isActive") VALUES (?, ?, 1)',
+                    'INSERT INTO "Session" ("userId", "createdAt", "isActive", "CHECKCODE") VALUES (?, ?, 1, ?)',
                     user["id"],
                     _now(),
+                    checkcode,
                 )
-                return _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', created.lastrowid))
+                session = _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', created.lastrowid))
+                active_count = await self._active_session_count(conn)
+                over_capacity = active_count > self.max_active_checkcodes
+                return {"session": session, "overCapacity": over_capacity, "activeCount": active_count}
+
+    async def door_verify(self, sender_uid: str, code_str: str | None) -> str:
+        """自助开门校验。返回状态：
+        SUCCESS_FIRST    在场+自己验证码正确+本次入场第一次成功开门
+        SUCCESS_AGAIN    在场+自己验证码正确+非第一次
+        WRONG_CODE       在场但验证码不对或不是自己的
+        STOLEN_CODE      不在场但验证码是场内某人的（冒用他人验证码）
+        NOT_PRESENT      不在场+验证码也不是场内任何人的
+        NO_CODE_PRESENT  在场没带验证码
+        NO_CODE_OFFLINE  不在场没带验证码
+        """
+        async with self._acquire() as conn:
+            async with conn.transaction():
+                sender_user = await self.find_user(sender_uid, conn)
+                sender_active_session = None
+                if sender_user:
+                    sender_active_session = await self.active_session(sender_uid, conn)
+                if code_str is None:
+                    if sender_active_session:
+                        return "NO_CODE_PRESENT"
+                    return "NO_CODE_OFFLINE"
+                code_norm = str(code_str).strip()
+                code_owner_session = None
+                if code_norm and re.fullmatch(r"\d{7}", code_norm):
+                    code_owner_row = await conn.fetchrow(
+                        'SELECT * FROM "Session" WHERE "CHECKCODE"=? AND "isActive"=1 LIMIT 1',
+                        code_norm,
+                    )
+                    code_owner_session = _row(code_owner_row) if code_owner_row else None
+                if sender_active_session:
+                    my_code = sender_active_session.get("CHECKCODE") or ""
+                    if my_code and code_norm and code_norm == my_code:
+                        opened = int(sender_active_session.get("doorOpened") or 0)
+                        if not opened:
+                            await conn.execute(
+                                'UPDATE "Session" SET "doorOpened"=1 WHERE id=?',
+                                sender_active_session["id"],
+                            )
+                            return "SUCCESS_FIRST"
+                        return "SUCCESS_AGAIN"
+                    return "WRONG_CODE"
+                if code_owner_session:
+                    return "STOLEN_CODE"
+                return "NOT_PRESENT"
 
     async def logout(self, uid: str) -> dict[str, Any]:
         async with self._acquire() as conn:
             async with conn.transaction():
+                session_before = await self.active_session(uid, conn)
+                if not session_before:
+                    raise ShinjukuError("用户未登录。", "USER_NOT_LOGGED_IN")
+                played_seconds = int((_now() - session_before["createdAt"]).total_seconds())
+                played_minutes = played_seconds // 60
+                # 入场限制时间：只影响第一个小时内的离场（≤login_grace_minutes 分钟当强制离场，>login_grace_minutes 且 <60 分钟按 1 小时保底结算）
+                force_mode = played_minutes <= self.login_grace_minutes and played_seconds < 3600
+                if force_mode:
+                    # 按强制离场处理：0 元、不扣钱、不发积分、不消耗优惠券（和 force_logout 一样）
+                    wallet_before = await self.wallet(uid, False, conn)
+                    await conn.execute(
+                        'UPDATE "Session" SET "closedAt"=?, "isActive"=NULL, "billingCost"=0, "finalCost"=0 WHERE id=?',
+                        _now(),
+                        session_before["id"],
+                    )
+                    closed = _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', session_before["id"]))
+                    return {
+                        "session": closed,
+                        "billing": {
+                            "totalCost": 0,
+                            "startTime": session_before["createdAt"],
+                            "endTime": closed.get("closedAt") or _now(),
+                            "segments": [],
+                            "blocks": [],
+                            "points": 0,
+                        },
+                        "wallet": wallet_before,
+                        "walletBefore": wallet_before,
+                        "walletAfter": await self.wallet(str(session_before["userId"]), True, conn),
+                        "loginGraceForced": True,
+                        "loginGraceMinutes": self.login_grace_minutes,
+                    }
                 preview = await self.billing(uid, conn)
                 wallet_before = preview["wallet"]
                 session = preview["session"]
                 billing = preview["billing"]
+                # 入场限制时间：第一个小时不足 1 小时（但已超过 login_grace_minutes），按 1 小时保底计费
+                if played_seconds < 3600 and played_minutes > self.login_grace_minutes and len(billing["segments"]) == 0:
+                    current = session["createdAt"]
+                    minute_of_day = current.hour * 60 + current.minute
+                    day_start = self._clock_minutes(str(self.billing_config.get("day_start") or "11:30"))
+                    is_day = minute_of_day >= day_start
+                    cfg_key_price = ("day_price_pass" if self._has_pass_for_billing(preview["wallet"]) else "day_price") if is_day else \
+                                   ("night_price_pass" if self._has_pass_for_billing(preview["wallet"]) else "night_price")
+                    cfg_key_cap = ("day_cap_pass" if self._has_pass_for_billing(preview["wallet"]) else "day_cap") if is_day else \
+                                 ("night_cap_pass" if self._has_pass_for_billing(preview["wallet"]) else "night_cap")
+                    rate = int(self.billing_config.get(cfg_key_price) or (12 if is_day else 13))
+                    cap = int(self.billing_config.get(cfg_key_cap) or 69)
+                    raw_cost = rate * 1
+                    seg_cost = min(raw_cost, cap)
+                    end_time = current + timedelta(hours=1)
+                    placeholder_seg = {
+                        "ruleId": 1 if is_day else 2,
+                        "ruleName": "白天计费" if is_day else "夜晚计费",
+                        "startTime": current,
+                        "endTime": end_time,
+                        "durationMinutes": 60,
+                        "cost": seg_cost,
+                        "isCapped": raw_cost > cap,
+                        "blockIndex": 0,
+                    }
+                    block24_end = min(current + timedelta(days=1), end_time)
+                    billing["segments"] = [placeholder_seg]
+                    billing["blocks"] = [
+                        {
+                            "startTime": current,
+                            "endTime": block24_end,
+                            "rawCost": seg_cost,
+                            "cappedCost": seg_cost,
+                            "isCapped": False,
+                        }
+                    ]
+                    billing["totalCost"] = seg_cost
+                    billing["points"] = 0 if placeholder_seg["isCapped"] else 1
+                    if placeholder_seg["isCapped"]:
+                        billing["points"] = self._cap_points(cap)
                 discount = preview.get("discount")
                 cost = session.get("costOverwrite")
                 if cost is None:
@@ -478,6 +638,11 @@ class ShinjukuService:
                 preview["walletBefore"] = wallet_before
                 preview["walletAfter"] = await self.wallet(str(session["userId"]), True, conn)
                 return preview
+
+    @staticmethod
+    def _has_pass_for_billing(wallet: dict[str, Any]) -> bool:
+        passes = wallet.get("passes", {}).get("details", {}).get("available", []) or []
+        return len(passes) > 0
 
     async def force_logout(self, uid: str) -> dict[str, Any]:
         """管理员强制退场：直接关闭会话，不做结算、不发积分。"""

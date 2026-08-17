@@ -169,6 +169,8 @@ def _format_leave_billing(res: dict[str, Any], currency: str, user_label: str) -
     final_cost = discount["finalCost"] if discount else billing["totalCost"]
     if session.get("costOverwrite") is not None:
         final_cost = session["costOverwrite"]
+    forced_short = bool(res.get("loginGraceForced"))
+    grace_minutes = int(res.get("loginGraceMinutes") or 0)
 
     wallet_before = res.get("walletBefore") or res["wallet"]
     wallet_after = res.get("walletAfter")
@@ -178,14 +180,21 @@ def _format_leave_billing(res: dict[str, Any], currency: str, user_label: str) -
 
     lines = [
         f"✅ 已为用户 {user_label} 退场",
-        "离开时请带走自己生产的垃圾以及手套，并且确认关好房门，否则可能会追究您的责任。",
+        "离开时请带走随身垃圾及手套，确认房门关好，欢迎您再次光临新宿。",
+    ]
+    if forced_short:
+        lines.insert(
+            1,
+            f"（{grace_minutes}分钟内离场，本次不参与结算）",
+        )
+    lines.extend([
         "--- 账单详情 ---",
         f"入场: {_dt(session['createdAt'])}",
         f"结束: {_dt(billing['endTime'])}",
         f"时长: {_duration(total_minutes)}",
         "---",
         f"计费价: {_money(original_cost)} {currency}",
-    ]
+    ])
     if balance_after < 0:
         lines.insert(1, f"⚠️ 本次结算后欠费 {_money(-balance_after)} {currency}，请联系主理人补款。")
     if discount and discount.get("appliedLogs"):
@@ -270,7 +279,7 @@ class ShinjukuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.currency = str(config.get("currency", "猫粮") or "猫粮")
+        self.currency = str(config.get("currency", "馕") or "馕")
         try:
             # AstrBot 官方插件数据目录：AstrBot/data/plugin_data/astrbot_plugin_shinjuku/
             default_db = str(StarTools.get_data_dir("astrbot_plugin_shinjuku") / "shinjuku.db")
@@ -279,8 +288,13 @@ class ShinjukuPlugin(Star):
             default_db = path.join(path.dirname(path.abspath(__file__)), "data", "shinjuku.db")
         db_path = str(config.get("database_path", "") or "") or default_db
         points_per_amount = int(config.get("points_per_amount") or 10)
+        max_active_checkcodes = int(config.get("max_active_checkcodes") or 20)
+        self_open_door_enabled = bool(config.get("self_open_door_enabled") is not False)
+        login_grace_minutes = int(config.get("login_grace_minutes") or 3)
+        self.self_open_door_enabled = self_open_door_enabled
         self.service = ShinjukuService(
-            db_path, self.currency, config.get("billing", {}) or {}, points_per_amount
+            db_path, self.currency, config.get("billing", {}) or {}, points_per_amount, max_active_checkcodes,
+            self_open_door_enabled, login_grace_minutes,
         )
         self.nicknames: dict[str, str] = {}
 
@@ -290,11 +304,51 @@ class ShinjukuPlugin(Star):
     def _sender_id(self, event: AstrMessageEvent) -> str:
         return str(event.get_sender_id())
 
+    def _sender_real_qq(self, event: AstrMessageEvent) -> str:
+        raw = self._sender_id(event)
+        if re.fullmatch(r"\d+", raw or ""):
+            return raw
+        for holder_name in ("sender", "message_obj"):
+            holder = getattr(event, holder_name, None)
+            if not holder:
+                continue
+            for attr in ("qq", "user_id", "uin", "uid", "id"):
+                value = getattr(holder, attr, None)
+                if value is None:
+                    continue
+                text = str(value)
+                if re.fullmatch(r"\d{5,}", text):
+                    return text
+        try:
+            components = event.get_messages() or []
+        except Exception:
+            components = []
+        for component in components:
+            for attr in ("qq", "user_id", "uin", "uid", "id"):
+                value = getattr(component, attr, None)
+                if value is None:
+                    continue
+                text = str(value)
+                if re.fullmatch(r"\d{5,}", text):
+                    return text
+        for getter in ("get_sender_qq", "get_user_id", "get_sender_uin"):
+            method = getattr(event, getter, None)
+            if callable(method):
+                try:
+                    value = method()
+                except Exception:
+                    value = None
+                if value is not None:
+                    text = str(value)
+                    if re.fullmatch(r"\d{5,}", text):
+                        return text
+        return raw
+
     def _sender_uid(self, event: AstrMessageEvent) -> str:
-        return f"QQ:{self._sender_id(event)}"
+        return f"QQ:{self._sender_real_qq(event)}"
 
     def _remember_sender_name(self, event: AstrMessageEvent) -> None:
-        qq = self._sender_id(event)
+        qq = self._sender_real_qq(event)
         for name in ("get_sender_name", "get_sender_nickname", "get_sender_display_name"):
             method = getattr(event, name, None)
             if callable(method):
@@ -319,7 +373,7 @@ class ShinjukuPlugin(Star):
         return {str(item) for item in (self.config.get("admins", []) or [])}
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
-        return self._sender_id(event) in self._admins()
+        return self._sender_real_qq(event) in self._admins()
 
     def _args(self, event: AstrMessageEvent) -> list[str]:
         text = event.message_str.strip()
@@ -335,7 +389,7 @@ class ShinjukuPlugin(Star):
             "register", "login", "logout", "list", "wallet", "history", "ahistory",
             "billing", "items", "redeem", "add", "mj", "member", "coupon", "giftcode", "j", "入场", "上机", "出场",
             "下机", "离场", "退场", "历史记录", "账单", "b", "背包", "钱包",
-            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给",
+            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给", "开门",
         }
         command = parts[0].lstrip("/")
         command = command.split("@", 1)[0]
@@ -461,7 +515,7 @@ class ShinjukuPlugin(Star):
                 uid = f"QQ:{at_ids[0]}" if at_ids else self._normalize_user(args[0], event)
                 qq = uid.split(":", 1)[1]
             else:
-                qq = self._sender_id(event)
+                qq = self._sender_real_qq(event)
             register_code = str(self.config.get("redeem_code_on_register", "") or "")
             result = await self.service.register(qq, register_code)
             if result["created"]:
@@ -477,11 +531,28 @@ class ShinjukuPlugin(Star):
     async def login_cmd(self, event: AstrMessageEvent):
         """登录/入场"""
         self._remember_sender_name(event)
+        sender_real_qq = self._sender_real_qq(event)
+        sender_uid = self._sender_uid(event)
         async def run():
             uid = self._target_from_optional_arg(event)
             prefix = await self._ensure_registered(uid)
-            session = await self.service.login(uid)
-            return prefix + "✅ 入场成功"
+            login_result = await self.service.login(uid)
+            session = login_result["session"]
+            over_capacity = bool(login_result.get("overCapacity"))
+            if self.self_open_door_enabled:
+                if uid == sender_uid:
+                    checkcode = session.get("CHECKCODE") or ""
+                    msg = prefix + f"[CQ:at,qq={sender_real_qq}] ✅ 入场成功，验证码：'{checkcode}'"
+                else:
+                    msg = prefix + "✅ 入场成功"
+            else:
+                if self._is_admin(event):
+                    msg = prefix + "✅ 入场成功"
+                else:
+                    msg = prefix + "✅ 入场成功，请联系管理员开门"
+            if over_capacity:
+                msg += "\nwoc，音趴！"
+            return msg
 
         yield event.plain_result(await self._safe(run()))
 
@@ -759,5 +830,41 @@ class ShinjukuPlugin(Star):
                 f"MJ 扣费成功：-{_money(amount)} {self.currency}\n"
                 f"余额：{_money(result['originalBalance'])} -> {_money(result['finalBalance'])} {self.currency}"
             )
+
+        yield event.plain_result(await self._safe(run()))
+
+    @filter.command("开门")
+    async def door_cmd(self, event: AstrMessageEvent):
+        """自助开门：/开门 [7位验证码]（或『开门+验证码』粘连，或『开门』单独发送）"""
+        self._remember_sender_name(event)
+        async def run():
+            if not self.self_open_door_enabled:
+                return "请联系管理员开门！"
+            raw = (event.message_str or "").strip()
+            text = raw.lstrip("/")
+            m = re.match(r"^开门\s*(\d{7})\s*$", text)
+            code = m.group(1) if m else None
+            if code is None:
+                args = self._args(event)
+                for arg in args:
+                    if re.fullmatch(r"\d{7}", arg):
+                        code = arg
+                        break
+            status = await self.service.door_verify(self._sender_uid(event), code)
+            if status == "SUCCESS_FIRST":
+                return "门已开，祝您游玩愉快！"
+            if status == "SUCCESS_AGAIN":
+                return "门已开！"
+            if status == "NOT_PRESENT":
+                return "人在哪呢，怎么就要我给开门？"
+            if status == "WRONG_CODE":
+                return "验证码不对啦，不能给你开门哦！请检查入场时发送的验证码！"
+            if status == "STOLEN_CODE":
+                return "验证码是你的吗就乱用，明明都不在门口还想乱用别人验证码，叉出去！"
+            if status == "NO_CODE_PRESENT":
+                return "笨蛋，开门要这样用：/开门 [7位数验证码]"
+            if status == "NO_CODE_OFFLINE":
+                return "要先进场才会有验证码啦！"
+            return "开门失败：未知错误。"
 
         yield event.plain_result(await self._safe(run()))
