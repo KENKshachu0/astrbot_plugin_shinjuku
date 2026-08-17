@@ -393,6 +393,10 @@ class ShinjukuPlugin(Star):
             raise ShinjukuError("请指定用户。")
         if raw.startswith("QQ:"):
             return raw
+        # AstrBot 的 @ 渲染格式为 @昵称(QQ号)，优先取括号里的真实 QQ
+        match = re.search(r"\((\d+)\)", raw)
+        if match:
+            return f"QQ:{match.group(1)}"
         match = re.search(r"\d+", raw)
         if match:
             return f"QQ:{match.group(0)}"
@@ -426,7 +430,8 @@ class ShinjukuPlugin(Star):
         if args:
             if not self._is_admin(event):
                 raise ShinjukuError("权限不足。")
-            uid = self._normalize_user(args[0], event)
+            at_ids = self._at_ids(event)
+            uid = f"QQ:{at_ids[0]}" if at_ids else self._normalize_user(args[0], event)
             self._at_label(event, uid)  # 记住被操作用户的昵称（如管理员代上机）
             return uid
         return self._sender_uid(event)
@@ -452,7 +457,8 @@ class ShinjukuPlugin(Star):
             if args:
                 if not self._is_admin(event):
                     raise ShinjukuError("权限不足。")
-                uid = self._normalize_user(args[0], event)
+                at_ids = self._at_ids(event)
+                uid = f"QQ:{at_ids[0]}" if at_ids else self._normalize_user(args[0], event)
                 qq = uid.split(":", 1)[1]
             else:
                 qq = self._sender_id(event)
@@ -560,7 +566,8 @@ class ShinjukuPlugin(Star):
             args = self._args(event)
             if not args:
                 raise ShinjukuError("用法：/ahistory <用户> [数量]")
-            uid = self._normalize_user(args[0], event, allow_self=False)
+            at_ids = self._at_ids(event)
+            uid = f"QQ:{at_ids[0]}" if at_ids else self._normalize_user(args[0], event, allow_self=False)
             self._at_label(event, uid)
             limit = int(args[1]) if len(args) > 1 and args[1].isdigit() else 5
             sessions = await self.service.history(uid, limit)
