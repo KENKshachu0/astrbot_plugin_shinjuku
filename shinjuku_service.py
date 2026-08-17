@@ -254,11 +254,12 @@ class ShinjukuService:
     def __init__(
         self,
         db_path: str,
-        currency: str = "猫粮",
+        currency: str = "馕",
         billing_config: dict[str, Any] | None = None,
         points_per_amount: int = 10,
         max_active_checkcodes: int = 20,
         self_open_door_enabled: bool = True,
+        login_grace_minutes: int = 3,
     ):
         self.db_path = db_path
         self.currency = currency
@@ -266,6 +267,7 @@ class ShinjukuService:
         self.points_per_amount = max(0, int(points_per_amount or 0))
         self.max_active_checkcodes = max(1, int(max_active_checkcodes or 20))
         self.self_open_door_enabled = bool(self_open_door_enabled)
+        self.login_grace_minutes = max(0, int(login_grace_minutes or 0))
         self._queue: asyncio.Queue[DBConn] | None = None
         self._init_lock = asyncio.Lock()
 
@@ -530,10 +532,82 @@ class ShinjukuService:
     async def logout(self, uid: str) -> dict[str, Any]:
         async with self._acquire() as conn:
             async with conn.transaction():
+                session_before = await self.active_session(uid, conn)
+                if not session_before:
+                    raise ShinjukuError("用户未登录。", "USER_NOT_LOGGED_IN")
+                played_seconds = int((_now() - session_before["createdAt"]).total_seconds())
+                played_minutes = played_seconds // 60
+                # 入场限制时间：只影响第一个小时内的离场（≤login_grace_minutes 分钟当强制离场，>login_grace_minutes 且 <60 分钟按 1 小时保底结算）
+                force_mode = played_minutes <= self.login_grace_minutes and played_seconds < 3600
+                if force_mode:
+                    # 按强制离场处理：0 元、不扣钱、不发积分、不消耗优惠券（和 force_logout 一样）
+                    wallet_before = await self.wallet(uid, False, conn)
+                    await conn.execute(
+                        'UPDATE "Session" SET "closedAt"=?, "isActive"=NULL, "billingCost"=0, "finalCost"=0 WHERE id=?',
+                        _now(),
+                        session_before["id"],
+                    )
+                    closed = _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', session_before["id"]))
+                    return {
+                        "session": closed,
+                        "billing": {
+                            "totalCost": 0,
+                            "startTime": session_before["createdAt"],
+                            "endTime": closed.get("closedAt") or _now(),
+                            "segments": [],
+                            "blocks": [],
+                            "points": 0,
+                        },
+                        "wallet": wallet_before,
+                        "walletBefore": wallet_before,
+                        "walletAfter": await self.wallet(str(session_before["userId"]), True, conn),
+                        "loginGraceForced": True,
+                        "loginGraceMinutes": self.login_grace_minutes,
+                    }
                 preview = await self.billing(uid, conn)
                 wallet_before = preview["wallet"]
                 session = preview["session"]
                 billing = preview["billing"]
+                # 入场限制时间：第一个小时不足 1 小时（但已超过 login_grace_minutes），按 1 小时保底计费
+                if played_seconds < 3600 and played_minutes > self.login_grace_minutes and len(billing["segments"]) == 0:
+                    current = session["createdAt"]
+                    minute_of_day = current.hour * 60 + current.minute
+                    day_start = self._clock_minutes(str(self.billing_config.get("day_start") or "11:30"))
+                    is_day = minute_of_day >= day_start
+                    cfg_key_price = ("day_price_pass" if self._has_pass_for_billing(preview["wallet"]) else "day_price") if is_day else \
+                                   ("night_price_pass" if self._has_pass_for_billing(preview["wallet"]) else "night_price")
+                    cfg_key_cap = ("day_cap_pass" if self._has_pass_for_billing(preview["wallet"]) else "day_cap") if is_day else \
+                                 ("night_cap_pass" if self._has_pass_for_billing(preview["wallet"]) else "night_cap")
+                    rate = int(self.billing_config.get(cfg_key_price) or (12 if is_day else 13))
+                    cap = int(self.billing_config.get(cfg_key_cap) or 69)
+                    raw_cost = rate * 1
+                    seg_cost = min(raw_cost, cap)
+                    end_time = current + timedelta(hours=1)
+                    placeholder_seg = {
+                        "ruleId": 1 if is_day else 2,
+                        "ruleName": "白天计费" if is_day else "夜晚计费",
+                        "startTime": current,
+                        "endTime": end_time,
+                        "durationMinutes": 60,
+                        "cost": seg_cost,
+                        "isCapped": raw_cost > cap,
+                        "blockIndex": 0,
+                    }
+                    block24_end = min(current + timedelta(days=1), end_time)
+                    billing["segments"] = [placeholder_seg]
+                    billing["blocks"] = [
+                        {
+                            "startTime": current,
+                            "endTime": block24_end,
+                            "rawCost": seg_cost,
+                            "cappedCost": seg_cost,
+                            "isCapped": False,
+                        }
+                    ]
+                    billing["totalCost"] = seg_cost
+                    billing["points"] = 0 if placeholder_seg["isCapped"] else 1
+                    if placeholder_seg["isCapped"]:
+                        billing["points"] = self._cap_points(cap)
                 discount = preview.get("discount")
                 cost = session.get("costOverwrite")
                 if cost is None:
@@ -564,6 +638,11 @@ class ShinjukuService:
                 preview["walletBefore"] = wallet_before
                 preview["walletAfter"] = await self.wallet(str(session["userId"]), True, conn)
                 return preview
+
+    @staticmethod
+    def _has_pass_for_billing(wallet: dict[str, Any]) -> bool:
+        passes = wallet.get("passes", {}).get("details", {}).get("available", []) or []
+        return len(passes) > 0
 
     async def force_logout(self, uid: str) -> dict[str, Any]:
         """管理员强制退场：直接关闭会话，不做结算、不发积分。"""

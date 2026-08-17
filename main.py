@@ -169,6 +169,8 @@ def _format_leave_billing(res: dict[str, Any], currency: str, user_label: str) -
     final_cost = discount["finalCost"] if discount else billing["totalCost"]
     if session.get("costOverwrite") is not None:
         final_cost = session["costOverwrite"]
+    forced_short = bool(res.get("loginGraceForced"))
+    grace_minutes = int(res.get("loginGraceMinutes") or 0)
 
     wallet_before = res.get("walletBefore") or res["wallet"]
     wallet_after = res.get("walletAfter")
@@ -179,13 +181,20 @@ def _format_leave_billing(res: dict[str, Any], currency: str, user_label: str) -
     lines = [
         f"✅ 已为用户 {user_label} 退场",
         "离开时请带走随身垃圾及手套，确认房门关好，欢迎您再次光临新宿。",
+    ]
+    if forced_short:
+        lines.insert(
+            1,
+            f"（{grace_minutes}分钟内离场，本次不参与结算）",
+        )
+    lines.extend([
         "--- 账单详情 ---",
         f"入场: {_dt(session['createdAt'])}",
         f"结束: {_dt(billing['endTime'])}",
         f"时长: {_duration(total_minutes)}",
         "---",
         f"计费价: {_money(original_cost)} {currency}",
-    ]
+    ])
     if balance_after < 0:
         lines.insert(1, f"⚠️ 本次结算后欠费 {_money(-balance_after)} {currency}，请联系主理人补款。")
     if discount and discount.get("appliedLogs"):
@@ -270,7 +279,7 @@ class ShinjukuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.currency = str(config.get("currency", "猫粮") or "猫粮")
+        self.currency = str(config.get("currency", "馕") or "馕")
         try:
             # AstrBot 官方插件数据目录：AstrBot/data/plugin_data/astrbot_plugin_shinjuku/
             default_db = str(StarTools.get_data_dir("astrbot_plugin_shinjuku") / "shinjuku.db")
@@ -281,10 +290,11 @@ class ShinjukuPlugin(Star):
         points_per_amount = int(config.get("points_per_amount") or 10)
         max_active_checkcodes = int(config.get("max_active_checkcodes") or 20)
         self_open_door_enabled = bool(config.get("self_open_door_enabled") is not False)
+        login_grace_minutes = int(config.get("login_grace_minutes") or 3)
         self.self_open_door_enabled = self_open_door_enabled
         self.service = ShinjukuService(
             db_path, self.currency, config.get("billing", {}) or {}, points_per_amount, max_active_checkcodes,
-            self_open_door_enabled,
+            self_open_door_enabled, login_grace_minutes,
         )
         self.nicknames: dict[str, str] = {}
 

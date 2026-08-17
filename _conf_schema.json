@@ -9,7 +9,7 @@
   "currency": {
     "description": "货币显示名",
     "type": "string",
-    "default": "猫粮"
+    "default": "馕"
   },
   "admins": {
     "description": "管理员用户 ID 列表",
@@ -40,6 +40,12 @@
     "type": "bool",
     "hint": "默认开启。开启后：入场时生成唯一 7 位验证码，用户可发送『开门+验证码』自助开门；关闭后：入场时不生成也不发送验证码，入场成功提示改为『请联系管理员开门』，任何开门请求也会回复请联系管理员。",
     "default": true
+  },
+  "login_grace_minutes": {
+    "description": "入场限制时间（分钟）",
+    "type": "int",
+    "hint": "默认 3 分钟，只影响入场后的第一个小时。玩家在入场≤该时间内离场 → 按强制离场处理（0 费用、不扣余额、不发积分）；超过该时间但仍在第一个小时内 → 直接按 1 小时结算；后续时段不影响，仍按正常宽限分钟计费。与 billing.grace_minutes（宽限分钟）完全独立。",
+    "default": 3
   },
   "billing": {
     "description": "计费规则与价格",
