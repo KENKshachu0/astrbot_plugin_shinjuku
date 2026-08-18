@@ -1,6 +1,6 @@
 # 新宿（astrbot_plugin_shinjuku）
 
-基于 [AstrBot](https://github.com/Soulter/AstrBot) 的原生上机计费插件，用于新宿音游窝的会员、入场、计费与结算。数据使用 **SQLite 本地存储**
+基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的原生上机计费插件，用于新宿音游窝的会员、入场、计费与结算。数据使用 **SQLite 本地存储**
 - 插件名：`astrbot_plugin_shinjuku`
 - 显示名：新宿
 - 版本：v0.1.9
