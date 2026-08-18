@@ -9,6 +9,7 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .shinjuku_service import ShinjukuError, ShinjukuService
@@ -403,13 +404,18 @@ class ShinjukuPlugin(Star):
             components = []
         for component in components:
             kind = f"{type(component).__name__} {getattr(component, 'type', '')}".lower()
-            if "at" not in kind and "mention" not in kind:
+            if "at" in kind or "mention" in kind:
+                for attr in ("qq", "user_id", "target", "id"):
+                    value = getattr(component, attr, None)
+                    if value:
+                        ids.append(str(value))
+                        break
                 continue
-            for attr in ("qq", "user_id", "target", "id"):
-                value = getattr(component, attr, None)
-                if value:
-                    ids.append(str(value))
-                    break
+            # 兼容以纯文本形式发送的 CQ at 代码：[CQ:at,qq=123]
+            text = getattr(component, "text", None)
+            if text:
+                for match in re.finditer(r"\[CQ:at,qq=[\"']?(\d+)[\"']?\]", str(text)):
+                    ids.append(match.group(1))
         return ids
 
     def _at_label(self, event: AstrMessageEvent, uid: str) -> str:
@@ -539,12 +545,18 @@ class ShinjukuPlugin(Star):
             login_result = await self.service.login(uid)
             session = login_result["session"]
             over_capacity = bool(login_result.get("overCapacity"))
+            if self.self_open_door_enabled and uid == sender_uid:
+                checkcode = session.get("CHECKCODE") or ""
+                components: list[Any] = []
+                if prefix:
+                    components.append(Plain(prefix))
+                components.append(At(name="", qq=sender_real_qq))
+                components.append(Plain(f" ✅ 入场成功，验证码：'{checkcode}'"))
+                if over_capacity:
+                    components.append(Plain("\nwoc，音趴！"))
+                return components
             if self.self_open_door_enabled:
-                if uid == sender_uid:
-                    checkcode = session.get("CHECKCODE") or ""
-                    msg = prefix + f"[CQ:at,qq={sender_real_qq}] ✅ 入场成功，验证码：'{checkcode}'"
-                else:
-                    msg = prefix + "✅ 入场成功"
+                msg = prefix + "✅ 入场成功"
             else:
                 if self._is_admin(event):
                     msg = prefix + "✅ 入场成功"
@@ -554,7 +566,11 @@ class ShinjukuPlugin(Star):
                 msg += "\nwoc，音趴！"
             return msg
 
-        yield event.plain_result(await self._safe(run()))
+        result = await self._safe(run())
+        if isinstance(result, list):
+            yield event.chain_result(result)
+        else:
+            yield event.plain_result(result)
 
     @filter.command("logout", alias={"出场", "下机", "离场", "退场"})
     async def logout_cmd(self, event: AstrMessageEvent):
