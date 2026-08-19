@@ -1,7 +1,7 @@
 name: astrbot_plugin_shinjuku
 display_name: 新宿
 desc: AstrBot 原生「新宿」上机计费插件，使用 SQLite 本地存储，首次运行自动建表。
-version: v0.1.9
+version: v0.1.91
 author: li
 repo: https://github.com/KENKshachu0/astrbot_plugin_shinjuku
 astrbot_version: ">=4.16"

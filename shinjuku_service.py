@@ -181,7 +181,8 @@ CREATE TABLE IF NOT EXISTS "Session" (
     "billingCost" INTEGER,
     "finalCost" INTEGER,
     "CHECKCODE" TEXT,
-    "doorOpened" INTEGER NOT NULL DEFAULT 0
+    "doorOpened" INTEGER NOT NULL DEFAULT 0,
+    "ENTRY_TYPE" TEXT NOT NULL DEFAULT 'normal'
 );
 CREATE INDEX IF NOT EXISTS idx_session_user_active ON "Session"("userId", "isActive");
 CREATE INDEX IF NOT EXISTS idx_session_checkcode ON "Session"("CHECKCODE");
@@ -324,6 +325,10 @@ class ShinjukuService:
         except sqlite3.OperationalError:
             pass
         try:
+            await conn._conn.execute('ALTER TABLE "Session" ADD COLUMN "ENTRY_TYPE" TEXT NOT NULL DEFAULT \'normal\'')
+        except sqlite3.OperationalError:
+            pass
+        try:
             await conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_session_checkcode ON "Session"("CHECKCODE")')
         except sqlite3.OperationalError:
             pass
@@ -455,7 +460,7 @@ class ShinjukuService:
                         gift_error = exc.message
                 return {"user": user, "created": True, "gift": gift, "gift_error": gift_error}
 
-    async def login(self, uid: str) -> dict[str, Any]:
+    async def login(self, uid: str, entry_type: str = "normal") -> dict[str, Any]:
         async with self._acquire() as conn:
             async with conn.transaction():
                 user = await self.find_user(uid, conn)
@@ -475,10 +480,11 @@ class ShinjukuService:
                 else:
                     checkcode = None
                 created = await conn.execute(
-                    'INSERT INTO "Session" ("userId", "createdAt", "isActive", "CHECKCODE") VALUES (?, ?, 1, ?)',
+                    'INSERT INTO "Session" ("userId", "createdAt", "isActive", "CHECKCODE", "ENTRY_TYPE") VALUES (?, ?, 1, ?, ?)',
                     user["id"],
                     _now(),
                     checkcode,
+                    entry_type,
                 )
                 session = _row(await conn.fetchrow('SELECT * FROM "Session" WHERE id=?', created.lastrowid))
                 active_count = await self._active_session_count(conn)
@@ -786,6 +792,12 @@ class ShinjukuService:
         if not user:
             return None
         return _row(await conn.fetchrow('SELECT * FROM "Session" WHERE "userId"=? AND "isActive"=1 LIMIT 1', user["id"]))
+
+    async def is_sneak_active(self, uid: str) -> bool:
+        """用户当前是否处于偷偷上机会话（ENTRY_TYPE=sneak 且 isActive=1）。"""
+        async with self._acquire() as conn:
+            session = await self.active_session(uid, conn)
+            return bool(session and session.get("ENTRY_TYPE") == "sneak")
 
     async def logged_in_users(self) -> list[dict[str, Any]]:
         async with self._acquire() as conn:

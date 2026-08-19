@@ -132,7 +132,7 @@ def _format_billing(res: dict[str, Any], currency: str) -> str:
     current_balance = res["wallet"]["total"]["available"]
     lines = [
         "--- 账单详情 ---",
-        f"入场: {_dt(session['createdAt'])}",
+        f"入场: {_dt(session['createdAt'])}{'（偷偷上机）' if session.get('ENTRY_TYPE') == 'sneak' else ''}",
         f"结算: {_dt(billing['endTime'])}",
         f"时长: {_duration(total_minutes)}",
         "---",
@@ -190,7 +190,7 @@ def _format_leave_billing(res: dict[str, Any], currency: str, user_label: str) -
         )
     lines.extend([
         "--- 账单详情 ---",
-        f"入场: {_dt(session['createdAt'])}",
+        f"入场: {_dt(session['createdAt'])}{'（偷偷上机）' if session.get('ENTRY_TYPE') == 'sneak' else ''}",
         f"结束: {_dt(billing['endTime'])}",
         f"时长: {_duration(total_minutes)}",
         "---",
@@ -250,11 +250,12 @@ def _format_history(sessions: list[dict[str, Any]], currency: str) -> str:
         end = item.get("closedAt")
         cost = item.get("finalCost")
         active = "进行中" if item.get("isActive") else "已结束"
-        lines.append(f"[{item['id']}] {active}｜{_dt(start)} -> {_dt(end) if end else '现在'}｜{_money(cost)} {currency}")
+        marker = "（偷偷上机）" if item.get("ENTRY_TYPE") == "sneak" else ""
+        lines.append(f"[{item['id']}] {active}{marker}｜{_dt(start)} -> {_dt(end) if end else '现在'}｜{_money(cost)} {currency}")
     return "\n".join(lines)
 
 
-def _format_players(users: list[dict[str, Any]], nicknames: dict[str, str] | None = None) -> str:
+def _format_players(users: list[dict[str, Any]], nicknames: dict[str, str] | None = None, mask_sneak: bool = False) -> str:
     nicknames = nicknames or {}
     lines = [f"👥 店内目前共有 {len(users)} 人"]
     for user in users:
@@ -263,8 +264,11 @@ def _format_players(users: list[dict[str, Any]], nicknames: dict[str, str] | Non
             if bind.get("type") == "QQ":
                 qq = str(bind.get("bid") or "")
                 break
-        name = nicknames.get(qq) or qq or f"用户#{user['id']}"
         session = (user.get("sessions") or [{}])[0]
+        if mask_sneak and session.get("ENTRY_TYPE") == "sneak":
+            name = "未知玩家"
+        else:
+            name = nicknames.get(qq) or qq or f"用户#{user['id']}"
         lines.extend(
             [
                 "",
@@ -275,7 +279,7 @@ def _format_players(users: list[dict[str, Any]], nicknames: dict[str, str] | Non
     return "\n".join(lines)
 
 
-@register("astrbot_plugin_shinjuku", "li", "新宿 上机计费插件", "0.1.9")
+@register("astrbot_plugin_shinjuku", "li", "新宿 上机计费插件", "0.1.91")
 class ShinjukuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -292,7 +296,9 @@ class ShinjukuPlugin(Star):
         max_active_checkcodes = int(config.get("max_active_checkcodes") or 20)
         self_open_door_enabled = bool(config.get("self_open_door_enabled") is not False)
         login_grace_minutes = int(config.get("login_grace_minutes") or 3)
+        sneak_login_enabled = bool(config.get("sneak_login_enabled") is True)
         self.self_open_door_enabled = self_open_door_enabled
+        self.sneak_login_enabled = sneak_login_enabled
         self.service = ShinjukuService(
             db_path, self.currency, config.get("billing", {}) or {}, points_per_amount, max_active_checkcodes,
             self_open_door_enabled, login_grace_minutes,
@@ -390,7 +396,7 @@ class ShinjukuPlugin(Star):
             "register", "login", "logout", "list", "wallet", "history", "ahistory",
             "billing", "items", "redeem", "add", "mj", "member", "coupon", "giftcode", "j", "入场", "上机", "出场",
             "下机", "离场", "退场", "历史记录", "账单", "b", "背包", "钱包",
-            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给", "开门",
+            "xsj", "新宿几", "窝几", "wj", "新宿j", "死给", "开门", "偷偷上机",
         }
         command = parts[0].lstrip("/")
         command = command.split("@", 1)[0]
@@ -485,6 +491,69 @@ class ShinjukuPlugin(Star):
             return prefix
         return ""
 
+    async def _masked_label(self, uid: str, label: str) -> str:
+        """偷偷上机功能开启且用户当前处于偷偷上机会话时，将其身份显示为「未知玩家」。"""
+        if not self.sneak_login_enabled:
+            return label
+        if await self.service.is_sneak_active(uid):
+            return "未知玩家"
+        return label
+
+    async def _call_onebot_action(self, client: Any, action: str, **kwargs: Any) -> Any:
+        """调用 OneBot API，兼容不同版本 AstrBot / aiocqhttp 的客户端接口。"""
+        call_action = getattr(client, "call_action", None)
+        if callable(call_action):
+            try:
+                return await call_action(action, **kwargs)
+            except AttributeError:
+                pass
+        api = getattr(client, "api", None)
+        if api is not None:
+            api_call = getattr(api, "call_action", None)
+            if callable(api_call):
+                return await api_call(action, **kwargs)
+            api_action = getattr(api, action, None)
+            if callable(api_action):
+                return await api_action(**kwargs)
+        client_action = getattr(client, action, None)
+        if callable(client_action):
+            return await client_action(**kwargs)
+        raise AttributeError(f"OneBot client 不支持 {action} API")
+
+    async def _recall_onebot_message(self, event: AstrMessageEvent) -> None:
+        """通过 OneBot API 撤回玩家发送的偷偷上机指令消息；失败仅记录日志，不影响原有功能。"""
+        try:
+            platform_name = event.get_platform_name()
+        except Exception:
+            platform_name = getattr(getattr(event, "platform_meta", None), "name", "") or ""
+        if platform_name != "aiocqhttp":
+            return
+        try:
+            message_id = getattr(event.message_obj, "message_id", None)
+            if not message_id:
+                return
+            client = getattr(event, "bot", None)
+            if client is None:
+                return
+            candidates: list[Any] = []
+            try:
+                candidates.append(int(message_id))
+            except (TypeError, ValueError):
+                pass
+            candidates.append(str(message_id))
+            last_error: Exception | None = None
+            for candidate in candidates:
+                try:
+                    await self._call_onebot_action(client, "delete_msg", message_id=candidate)
+                    logger.info(f"新宿：已撤回偷偷上机指令消息 {message_id}")
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    logger.debug(f"新宿撤回指令消息失败（{candidate}）: {exc}")
+            logger.error(f"新宿：撤回偷偷上机指令消息失败: {last_error}")
+        except Exception as exc:
+            logger.error(f"新宿：撤回偷偷上机指令消息失败: {exc}")
+
     def _target_from_optional_arg(self, event: AstrMessageEvent) -> str:
         args = self._args(event)
         if args:
@@ -572,16 +641,72 @@ class ShinjukuPlugin(Star):
         else:
             yield event.plain_result(result)
 
-    @filter.command("logout", alias={"出场", "下机", "离场", "退场"})
-    async def logout_cmd(self, event: AstrMessageEvent):
-        """登出/结算"""
+    @filter.command("偷偷上机")
+    async def sneak_login_cmd(self, event: AstrMessageEvent):
+        """偷偷上机：仅已注册用户可偷偷上机（未注册用户回复「用户未注册」，不自动注册），
+        计费流程与 /login 一致，但会话标记为「偷偷上机」；
+        处理完成后通过 OneBot API 撤回玩家发送的指令消息。
+        功能开关 sneak_login_enabled 关闭时不响应（与未修改版本行为一致）。"""
+        if not self.sneak_login_enabled:
+            event.stop_event()
+            return
         self._remember_sender_name(event)
+        sender_real_qq = self._sender_real_qq(event)
+        sender_uid = self._sender_uid(event)
+
         async def run():
             uid = self._target_from_optional_arg(event)
-            result = await self.service.logout(uid)
-            return _format_leave_billing(result, self.currency, self._at_label(event, uid))
+            if not await self.service.find_user(uid):
+                return "用户未注册"
+            login_result = await self.service.login(uid, "sneak")
+            session = login_result["session"]
+            over_capacity = bool(login_result.get("overCapacity"))
+            if self.self_open_door_enabled and uid == sender_uid:
+                checkcode = session.get("CHECKCODE") or ""
+                components: list[Any] = []
+                components.append(Plain("未知玩家"))
+                components.append(Plain(f" ✅ 入场成功，验证码：'{checkcode}'"))
+                if over_capacity:
+                    components.append(Plain("\nwoc，音趴！"))
+                return components
+            if self.self_open_door_enabled:
+                msg = "✅ 入场成功"
+            else:
+                if self._is_admin(event):
+                    msg = "✅ 入场成功"
+                else:
+                    msg = "✅ 入场成功，请联系管理员开门"
+            if over_capacity:
+                msg += "\nwoc，音趴！"
+            return msg
 
-        yield event.plain_result(await self._safe(run()))
+        result = await self._safe(run())
+        await self._recall_onebot_message(event)
+        if isinstance(result, list):
+            yield event.chain_result(result)
+        else:
+            yield event.plain_result(result)
+
+    @filter.command("logout", alias={"出场", "下机", "离场", "退场"})
+    async def logout_cmd(self, event: AstrMessageEvent):
+        """登出/结算；若退场的是偷偷上机玩家，则通过 OneBot API 撤回其发送的指令消息。"""
+        self._remember_sender_name(event)
+        sneaked = False
+
+        async def run():
+            nonlocal sneaked
+            uid = self._target_from_optional_arg(event)
+            result = await self.service.logout(uid)
+            sneaked = self.sneak_login_enabled and result["session"].get("ENTRY_TYPE") == "sneak"
+            label = self._at_label(event, uid)
+            if sneaked:
+                label = "未知玩家"
+            return _format_leave_billing(result, self.currency, label)
+
+        result = await self._safe(run())
+        if sneaked:
+            await self._recall_onebot_message(event)
+        yield event.plain_result(result)
 
     @filter.regex(r"^/?死给(?:\s|@|$)")
     async def force_logout_cmd(self, event: AstrMessageEvent):
@@ -598,7 +723,10 @@ class ShinjukuPlugin(Star):
 
         async def run():
             result = await self.service.force_logout(uid)
-            return f"已强制为用户 {self._at_label(event, uid)} 退场"
+            label = self._at_label(event, uid)
+            if self.sneak_login_enabled and result["session"].get("ENTRY_TYPE") == "sneak":
+                label = "未知玩家"
+            return f"已强制为用户 {label} 退场"
 
         event.stop_event()
         yield event.plain_result(await self._safe(run()))
@@ -673,8 +801,14 @@ class ShinjukuPlugin(Star):
                 return "当前没有登录用户。"
             lines = ["--- 当前登录 ---"]
             for user in users:
-                binds = ", ".join(f"{bind['type']}:{bind['bid']}" for bind in user.get("binds", []))
-                lines.append(f"#{user['id']} {binds or '(无绑定)'}")
+                sessions = user.get("sessions") or []
+                is_sneak = bool(sessions and sessions[0].get("ENTRY_TYPE") == "sneak")
+                if is_sneak and self.sneak_login_enabled:
+                    binds_display = "未知玩家"
+                else:
+                    binds_display = ", ".join(f"{bind['type']}:{bind['bid']}" for bind in user.get("binds", [])) or "(无绑定)"
+                marker = "（偷偷上机）" if is_sneak else ""
+                lines.append(f"#{user['id']} {binds_display}{marker}")
             return "\n".join(lines)
 
         yield event.plain_result(await self._safe(run()))
@@ -685,7 +819,7 @@ class ShinjukuPlugin(Star):
         self._remember_sender_name(event)
         async def run():
             users = await self.service.logged_in_users()
-            return _format_players(users, self.nicknames)
+            return _format_players(users, self.nicknames, self.sneak_login_enabled)
 
         yield event.plain_result(await self._safe(run()))
 
@@ -731,9 +865,10 @@ class ShinjukuPlugin(Star):
                 raise ShinjukuError("添加金额必须大于 0。")
             prefix = await self._ensure_registered(uid, self._at_label(event, uid))
             result = await self.service.add_paid_currency(uid, amount, f"admin add by {self._sender_id(event)}")
+            label = await self._masked_label(uid, self._at_label(event, uid))
             return (
                 prefix +
-                f"为用户 {self._at_label(event, uid)} 增加{self.currency}成功\n"
+                f"为用户 {label} 增加{self.currency}成功\n"
                 f"增加前: {_money(result['originalBalance'])}\n"
                 f"增加后: {_money(result['finalBalance'])}"
             )
@@ -756,9 +891,10 @@ class ShinjukuPlugin(Star):
                 raise ShinjukuError("用法：/member @成员")
             prefix = await self._ensure_registered(uid, self._at_label(event, uid))
             result = await self.service.add_pass(uid, 30, f"member grant by {self._sender_id(event)}")
+            label = await self._masked_label(uid, self._at_label(event, uid))
             return (
                 prefix +
-                f"已为用户 {self._at_label(event, uid)} 发放 30 天通行证\n"
+                f"已为用户 {label} 发放 30 天通行证\n"
                 f"到期时间: {_dt(result.get('expireAt'))}"
             )
 
@@ -790,9 +926,10 @@ class ShinjukuPlugin(Star):
             prefix = await self._ensure_registered(uid, self._at_label(event, uid))
             result = await self.service.grant_coupon(uid, tenths, days, f"coupon grant by {self._sender_id(event)}")
             label = result["asset"].get("name") or f"{result['discount_tenths']:g}折优惠券"
+            user_label = await self._masked_label(uid, self._at_label(event, uid))
             return (
                 prefix +
-                f"已为用户 {self._at_label(event, uid)} 发放 {label}\n"
+                f"已为用户 {user_label} 发放 {label}\n"
                 f"有效期至: {_dt(result['userAsset'].get('expireAt'))}"
             )
 
