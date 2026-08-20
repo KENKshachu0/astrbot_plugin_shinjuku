@@ -95,7 +95,20 @@
       "night_end": {
         "description": "夜晚结束时间",
         "type": "string",
-        "default": "11:30"
+        "hint": "默认 12:00。已经进入包夜计费的会话可持续到该时间；与白天开始时间重叠时，11:30 后新入场用户仍优先按白天计费。",
+        "default": "12:00"
+      },
+      "late_day_start": {
+        "description": "深夜入场首小时按白天计费的开始时间",
+        "type": "string",
+        "hint": "默认 23:00。该时间至 day_end 之间入场，首小时完整按白天价格计费，即使跨过午夜。",
+        "default": "23:00"
+      },
+      "night_cap_cover_start": {
+        "description": "首小时费用纳入包夜封顶的开始时间",
+        "type": "string",
+        "hint": "默认 23:30。该时间至 day_end 之间入场，首小时白天费用会与后续夜间费用合并参与包夜封顶；合计达到封顶后只收包夜封顶，不再额外叠加首小时费用。包夜结束后的白天费用仍另行计算。",
+        "default": "23:30"
       },
       "night_price": {
         "description": "夜晚每小时价格（元）",

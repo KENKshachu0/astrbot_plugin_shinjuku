@@ -364,49 +364,141 @@ class ShinjukuService:
             candidate += timedelta(days=1)
         return candidate
 
-    def calculate_billing(self, start: datetime, end: datetime, pass_override: bool = False) -> dict[str, Any]:
-        """按白天/夜晚两档时段计算费用，不足一小时按一小时计，并应用各时段封顶。"""
+    @staticmethod
+    def _minutes_in_window(current: int, start: int, end: int) -> bool:
+        """判断分钟数是否处于可能跨午夜的 [start, end) 时段。"""
+        if start == end:
+            return True
+        if start < end:
+            return start <= current < end
+        return current >= start or current < end
+
+    def _entry_rule(self, entry_at: datetime) -> str:
+        """确定新入场用户的初始计费规则；白天与包夜重叠时，新用户优先按白天计费。"""
+        cfg = self.billing_config
+        current = entry_at.hour * 60 + entry_at.minute
+        day_start = self._clock_minutes(str(cfg.get("day_start") or "11:30"))
+        day_end = self._clock_minutes(str(cfg.get("day_end") or "00:00"))
+        night_start = self._clock_minutes(str(cfg.get("night_start") or "00:00"))
+        night_end = self._clock_minutes(str(cfg.get("night_end") or "12:00"))
+        if self._minutes_in_window(current, day_start, day_end):
+            return "day"
+        if self._minutes_in_window(current, night_start, night_end):
+            return "night"
+        return "day" if current >= day_start else "night"
+
+    def _is_late_day_entry(self, entry_at: datetime, config_key: str, default: str) -> bool:
+        cfg = self.billing_config
+        current = entry_at.hour * 60 + entry_at.minute
+        window_start = self._clock_minutes(str(cfg.get(config_key) or default))
+        day_end = self._clock_minutes(str(cfg.get("day_end") or "00:00"))
+        return self._minutes_in_window(current, window_start, day_end)
+
+    def calculate_billing(
+        self,
+        start: datetime,
+        end: datetime,
+        pass_override: bool = False,
+        session_start: datetime | None = None,
+    ) -> dict[str, Any]:
+        """按会话上下文切分白天/夜晚计费，支持深夜首小时跨午夜和包夜封顶覆盖。"""
         cfg = self.billing_config
         day_price = int(cfg.get("day_price_pass" if pass_override else "day_price") or 12)
         day_cap = int(cfg.get("day_cap_pass" if pass_override else "day_cap") or 69)
         night_price = int(cfg.get("night_price_pass" if pass_override else "night_price") or 13)
         night_cap = int(cfg.get("night_cap_pass" if pass_override else "night_cap") or 69)
-        day_start_min = self._clock_minutes(str(cfg.get("day_start") or "11:30"))
-        night_start_min = self._clock_minutes(str(cfg.get("night_start") or "00:00"))
+        day_end_min = self._clock_minutes(str(cfg.get("day_end") or "00:00"))
+        night_end_min = self._clock_minutes(str(cfg.get("night_end") or "12:00"))
         grace_minutes = int(cfg.get("grace_minutes") or 0)
 
         segments: list[dict[str, Any]] = []
-        total_cost = 0
-        current = start
-        while current < end:
-            current_minutes = current.hour * 60 + current.minute
-            is_day = current_minutes >= day_start_min
-            rate = day_price if is_day else night_price
-            cap = day_cap if is_day else night_cap
-            boundary_minutes = night_start_min if is_day else day_start_min
-            segment_end = min(self._next_boundary_at(current, boundary_minutes), end)
-            duration_minutes = int((segment_end - current).total_seconds() // 60)
-            if duration_minutes > 0:
-                units = duration_minutes // 60
-                if duration_minutes % 60 > grace_minutes:
-                    units += 1
-                raw_cost = units * rate
-                cost = min(raw_cost, cap)
-                segments.append(
-                    {
-                        "ruleId": 1 if is_day else 2,
-                        "ruleName": "白天计费" if is_day else "夜晚计费",
-                        "startTime": current,
-                        "endTime": segment_end,
-                        "durationMinutes": duration_minutes,
-                        "cost": cost,
-                        "isCapped": raw_cost > cap,
-                    }
-                )
-                total_cost += cost
-            current = segment_end
+        session_start = session_start or start
 
-        return {"totalCost": total_cost, "startTime": start, "endTime": end, "segments": segments}
+        def append_segment(rule: str, segment_start: datetime, segment_end: datetime, reason: str = "") -> None:
+            duration_minutes = int((segment_end - segment_start).total_seconds() // 60)
+            if duration_minutes <= 0:
+                return
+            rate = day_price if rule == "day" else night_price
+            cap = day_cap if rule == "day" else night_cap
+            units = duration_minutes // 60
+            if duration_minutes % 60 > grace_minutes:
+                units += 1
+            raw_cost = units * rate
+            cost = min(raw_cost, cap)
+            segment = {
+                "ruleId": 1 if rule == "day" else 2,
+                "ruleName": "白天计费" if rule == "day" else "夜晚计费",
+                "startTime": segment_start,
+                "endTime": segment_end,
+                "durationMinutes": duration_minutes,
+                "rawCost": raw_cost,
+                "cost": cost,
+                "isCapped": raw_cost > cap,
+                "reachedCap": raw_cost >= cap,
+            }
+            if reason:
+                segment["reason"] = reason
+            segments.append(segment)
+
+        current = start
+        first_block = start == session_start
+        bridge_segment: dict[str, Any] | None = None
+
+        # 23:00-00:00 入场时，首小时完整按白天计费，即使这一小时跨过午夜。
+        if first_block and self._is_late_day_entry(session_start, "late_day_start", "23:00"):
+            bridge_end = min(session_start + timedelta(hours=1), end)
+            append_segment("day", current, bridge_end, "late_entry_first_hour")
+            bridge_segment = segments[-1] if segments else None
+            current = bridge_end
+            rule = "night"
+        else:
+            rule = self._entry_rule(current)
+
+        while current < end:
+            boundary_minutes = day_end_min if rule == "day" else night_end_min
+            segment_end = min(self._next_boundary_at(current, boundary_minutes), end)
+            append_segment(rule, current, segment_end)
+            current = segment_end
+            rule = "night" if rule == "day" else "day"
+
+        # 23:30 后入场时，首小时白天费用与紧随其后的首个夜间段共同参与包夜封顶。
+        cover_eligible = first_block and self._is_late_day_entry(
+            session_start,
+            "night_cap_cover_start",
+            "23:30",
+        )
+        overnight_cap: dict[str, Any] | None = None
+        if bridge_segment is not None and cover_eligible:
+            bridge_index = segments.index(bridge_segment)
+            covered_segments = [bridge_segment]
+            for segment in segments[bridge_index + 1:]:
+                if segment["ruleId"] != 2:
+                    break
+                covered_segments.append(segment)
+            if len(covered_segments) > 1:
+                bundle_cost = sum(segment["cost"] for segment in covered_segments)
+                if bundle_cost >= night_cap:
+                    for segment in covered_segments:
+                        segment["overnightCapCovered"] = True
+                    overnight_cap = {
+                        "startTime": covered_segments[0]["startTime"],
+                        "endTime": covered_segments[-1]["endTime"],
+                        "rawCost": bundle_cost,
+                        "cappedCost": night_cap,
+                        "saved": bundle_cost - night_cap,
+                        "isCapped": True,
+                    }
+
+        total_cost = sum(segment["cost"] for segment in segments)
+        if overnight_cap is not None:
+            total_cost -= overnight_cap["saved"]
+        return {
+            "totalCost": total_cost,
+            "startTime": start,
+            "endTime": end,
+            "segments": segments,
+            "overnightCap": overnight_cap,
+        }
 
     def _cap_points(self, cap_value: int) -> int:
         """封顶金额折算积分：每 points_per_amount 元得 1 积分（向上取整）。"""
@@ -686,23 +778,38 @@ class ShinjukuService:
         # 按 24 小时块逐块封顶：每个从入场时刻起的 24 小时块最多收 cap24
         segments: list[dict[str, Any]] = []
         blocks: list[dict[str, Any]] = []
+        overnight_caps: list[dict[str, Any]] = []
         total_cost = 0
         total_points = 0
         current = session["createdAt"]
         while current < end:
             block_end = min(current + timedelta(days=1), end)
-            block = self.calculate_billing(current, block_end, monthly_pass)
+            block = self.calculate_billing(
+                current,
+                block_end,
+                monthly_pass,
+                session_start=session["createdAt"],
+            )
             raw_block_cost = block["totalCost"]
             block_cost = min(raw_block_cost, cap24) if cap24 > 0 else raw_block_cost
             total_cost += block_cost
+            overnight_cap = block.get("overnightCap")
+            if overnight_cap:
+                overnight_cap = dict(overnight_cap)
+                overnight_cap["blockIndex"] = len(blocks)
+                overnight_caps.append(overnight_cap)
             if cap24 > 0 and block["totalCost"] > cap24:
                 # 触发 24 小时封顶：该块积分按封顶金额折算
                 total_points += self._cap_points(cap24)
             else:
+                if overnight_cap:
+                    total_points += self._cap_points(night_cap)
                 for seg in block["segments"]:
+                    if seg.get("overnightCapCovered"):
+                        continue
                     if seg["isCapped"]:
                         # 触发白天/夜晚时段封顶：该段积分按封顶金额折算
-                        cap = day_cap if seg["ruleName"] == "白天计费" else night_cap
+                        cap = day_cap if seg["ruleId"] == 1 else night_cap
                         total_points += self._cap_points(cap)
                     else:
                         # 正常消费：按游玩小时数，1 小时 1 积分（不足 1 小时不计）
@@ -717,6 +824,7 @@ class ShinjukuService:
                         "rawCost": raw_block_cost,
                         "cappedCost": block_cost,
                         "isCapped": raw_block_cost > cap24,
+                        "overnightCap": overnight_cap,
                     }
                 )
             segments.extend(block["segments"])
@@ -727,6 +835,7 @@ class ShinjukuService:
             "endTime": end,
             "segments": segments,
             "blocks": blocks,
+            "overnightCaps": overnight_caps,
             "points": total_points,
         }
 

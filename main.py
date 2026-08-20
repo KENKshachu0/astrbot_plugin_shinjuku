@@ -44,11 +44,20 @@ def _format_time_range(start: datetime, end: datetime) -> str:
 
 
 def _format_segment_lines(segment: dict[str, Any], currency: str, indent: str = "") -> list[str]:
+    rule_name = segment["ruleName"]
+    if segment.get("reason") == "late_entry_first_hour":
+        rule_name += "（深夜入场首小时）"
+    suffix = ""
+    if segment.get("overnightCapCovered"):
+        suffix = "（计入包夜封顶）"
+    elif segment["isCapped"]:
+        suffix = " (已封顶)"
+    fee = f"{_money(segment['cost'])} {currency}{suffix}"
     return [
-        f"{indent}- {segment['ruleName']}",
+        f"{indent}- {rule_name}",
         f"{indent}  时段: {_format_time_range(segment['startTime'], segment['endTime'])}",
         f"{indent}  时长: {_duration(segment['durationMinutes'])}",
-        f"{indent}  费用: {_money(segment['cost'])} {currency}{' (已封顶)' if segment['isCapped'] else ''}",
+        f"{indent}  费用: {fee}",
     ]
 
 
@@ -62,6 +71,11 @@ def _format_billing_blocks(billing: dict[str, Any], currency: str) -> list[str]:
     if not blocks:
         for segment in segments:
             lines.extend(_format_segment_lines(segment, currency))
+        for cap in billing.get("overnightCaps") or []:
+            lines.append(
+                f"包夜封顶: {_money(cap['rawCost'])} {currency} → "
+                f"{_money(cap['cappedCost'])} {currency}"
+            )
         return lines
     grouped: dict[int, list[dict[str, Any]]] = {}
     for segment in segments:
@@ -70,6 +84,12 @@ def _format_billing_blocks(billing: dict[str, Any], currency: str) -> list[str]:
         lines.append(f"[24小时块 {index}/{len(blocks)}] {_format_time_range(block['startTime'], block['endTime'])}")
         for segment in grouped.get(index - 1, []):
             lines.extend(_format_segment_lines(segment, currency, indent="  "))
+        overnight_cap = block.get("overnightCap")
+        if overnight_cap:
+            lines.append(
+                f"  包夜封顶: {_money(overnight_cap['rawCost'])} {currency} → "
+                f"{_money(overnight_cap['cappedCost'])} {currency}"
+            )
         if block.get("isCapped"):
             lines.append(f"  小计: {_money(block['rawCost'])} {currency} → 封顶 {_money(block['cappedCost'])} {currency}")
         else:
@@ -104,7 +124,9 @@ def _format_pricing(cfg: dict[str, Any], currency: str) -> str:
     day_start = str(cfg.get("day_start") or "11:30")
     day_end = str(cfg.get("day_end") or "00:00")
     night_start = str(cfg.get("night_start") or "00:00")
-    night_end = str(cfg.get("night_end") or "11:30")
+    night_end = str(cfg.get("night_end") or "12:00")
+    late_day_start = str(cfg.get("late_day_start") or "23:00")
+    night_cap_cover_start = str(cfg.get("night_cap_cover_start") or "23:30")
 
     lines = [
         "--- 新宿定价表 ---",
@@ -114,6 +136,8 @@ def _format_pricing(cfg: dict[str, Any], currency: str) -> str:
         f"【夜晚】{night_start} - {night_end}",
         f"  普通用户：{_money(night_price)} {currency}/小时，封顶 {_money(night_cap)} {currency}",
         f"  月卡用户：{_money(night_price_pass)} {currency}/小时，封顶 {_money(night_cap_pass)} {currency}",
+        f"【深夜衔接】{late_day_start} - {day_end} 入场首小时按白天计费",
+        f"  {night_cap_cover_start} 后入场时，首小时白天费用纳入包夜封顶，不再额外叠加",
         f"【连续 24 小时】封顶 {_money(cap_24h)} {currency}（月卡 {_money(cap_24h_pass)} {currency}）",
     ]
     return "\n".join(lines)
@@ -279,7 +303,7 @@ def _format_players(users: list[dict[str, Any]], nicknames: dict[str, str] | Non
     return "\n".join(lines)
 
 
-@register("astrbot_plugin_shinjuku", "li", "新宿 上机计费插件", "0.1.91")
+@register("astrbot_plugin_shinjuku", "li", "新宿 上机计费插件", "0.1.92")
 class ShinjukuPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
