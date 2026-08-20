@@ -3,7 +3,7 @@
 基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的原生上机计费插件，用于新宿音游窝的会员、入场、计费与结算。数据使用 **SQLite 本地存储**
 - 插件名：`astrbot_plugin_shinjuku`
 - 显示名：新宿
-- 版本：v0.1.93
+- 版本：v0.2.0
 - 最低 AstrBot 版本：>= 4.16
 
 --若有音游窝计费需求，请在使用前联系作者（新宿音游社 QQ 群：1064813917），以便作者了解使用情况、提供后续更新与支持。
