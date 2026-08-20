@@ -1011,6 +1011,25 @@ class ShinjukuService:
                 item["asset"]["billingEffect"] = _json(item["asset"]["billingEffect"])
         return result
 
+    async def mahjong_rank(self, uid: str, conn: DBConn | None = None) -> dict[str, Any] | None:
+        """读取日麻插件写入同一新宿数据库的段位资料；未联动或未参赛时返回 None。"""
+        if conn is None:
+            async with self._acquire() as acquired:
+                return await self.mahjong_rank(uid, acquired)
+        user = await self.find_user(uid, conn)
+        if not user:
+            raise ShinjukuError("用户不存在。", "USER_NOT_FOUND")
+        exists = await conn.fetchval(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='MahjongRank'"
+        )
+        if not exists:
+            return None
+        return _row(
+            await conn.fetchrow(
+                'SELECT * FROM "MahjongRank" WHERE "userId"=? LIMIT 1', user["id"]
+            )
+        )
+
     async def add_paid_currency(self, uid: str, amount: float, comment: str = "admin add") -> dict[str, Any]:
         async with self._acquire() as conn:
             async with conn.transaction():

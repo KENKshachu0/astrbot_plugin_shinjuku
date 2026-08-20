@@ -76,7 +76,7 @@ astrbot_plugin_shinjuku/
 | `/偷偷上机` | — | 偷偷入场（需已注册，且配置中开启 `sneak_login_enabled`；未注册回复「用户未注册」），计费与 `/login` 一致，但会话标记为「偷偷上机」，在账单/历史记录/管理员列表中单独标注 |
 | `/billing` | `/账单` `/b` | 查看当前账单 |
 | `/wallet` | `/钱包` | 查看钱包 |
-| `/items` | `/背包` | 查看资产清单 |
+| `/items` | `/背包` | 查看资产清单；新宿日麻启用用户数据库联动后，同时显示本人的日麻段位、Rate 和战绩 |
 | `/history` | `/历史记录` | 查看历史记录（可加数量，如 `/history 10`） |
 | `/redeem` | — | 兑换兑换码，如 `/redeem ABC123` |
 | `j` | `xsj` `新宿几` `窝几` `wj` `新宿j` | 直接发送（无斜杠）查询店内人数 |
@@ -121,5 +121,5 @@ astrbot_plugin_shinjuku/
 ## 数据存储
 
 - 默认数据库：AstrBot 数据目录 `AstrBot/data/plugin_data/astrbot_plugin_shinjuku/shinjuku.db`（通过 `StarTools.get_data_dir()` 获取，删除插件不丢数据；可在配置 `database_path` 指定其他路径）；
-- 自动建表：`User`（用户）、`Bind`（平台绑定）、`Session`（会话）、`Asset`（资产定义）、`UserAsset`（持有资产，数量可为负表示欠费）、`UserAssetLog`（资产变动流水）、`Present`（礼包）、`Redeem`（兑换码）、`RedeemRecord`（兑换记录）；
+- 自动建表：`User`（用户）、`Bind`（平台绑定）、`Session`（会话）、`Asset`（资产定义）、`UserAsset`（持有资产，数量可为负表示欠费）、`UserAssetLog`（资产变动流水）、`Present`（礼包）、`Redeem`（兑换码）、`RedeemRecord`（兑换记录）；新宿日麻开启联动后，会在同一数据库中额外维护独立的 `MahjongRank` 与 `MahjongMatch` 表；
 - 备份：直接复制数据库文件即可；数据库采用 WAL 模式，备份前建议关闭插件。
