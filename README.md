@@ -44,6 +44,9 @@ astrbot_plugin_shinjuku/
 | `admins` | list | [] | 管理员用户 ID（QQ 号），可执行管理指令 |
 | `redeem_code_on_register` | string | 空 | 注册后自动发放的兑换码；留空注册不送礼 |
 | `points_per_amount` | int | 10 | 封顶积分折算金额（元）；触发封顶时每 10 元封顶得 1 积分（向上取整），正常时段按游玩小时数 1 小时 1 积分，设 0 关闭 |
+| `max_active_checkcodes` | int | 20 | 同时存在的最大验证码数量（店内人数上限）；当前在线人数超过该值时，入场成功后追加提示 |
+| `self_open_door_enabled` | bool | true | 自助开门开关；开启后入场生成 7 位验证码并允许使用 `/开门`，关闭后不生成验证码并提示联系管理员开门 |
+| `login_grace_minutes` | int | 3 | 入场限制时间；在第一个小时内，入场不超过该分钟数即离场时按强制退场处理，不收费、不扣余额、不发积分 |
 | `sneak_login_enabled` | bool | false | 偷偷上机功能开关；开启后 `/偷偷上机` 可用，关闭后指令不响应，与未修改版本行为一致 |
 
 ### 计费规则（`billing`）

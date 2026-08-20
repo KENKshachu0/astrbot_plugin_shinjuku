@@ -292,7 +292,8 @@ class ShinjukuPlugin(Star):
             # 旧版 AstrBot 无此接口时回退到插件目录
             default_db = path.join(path.dirname(path.abspath(__file__)), "data", "shinjuku.db")
         db_path = str(config.get("database_path", "") or "") or default_db
-        points_per_amount = int(config.get("points_per_amount") or 10)
+        points_per_amount_value = config.get("points_per_amount")
+        points_per_amount = int(points_per_amount_value if points_per_amount_value is not None else 10)
         max_active_checkcodes = int(config.get("max_active_checkcodes") or 20)
         self_open_door_enabled = bool(config.get("self_open_door_enabled") is not False)
         login_grace_minutes = int(config.get("login_grace_minutes") or 3)
